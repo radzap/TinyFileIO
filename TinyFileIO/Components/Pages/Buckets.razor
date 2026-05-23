@@ -1,0 +1,1258 @@
+@page "/_tfio/buckets"
+@page "/_tfio/buckets/{BucketName}"
+@page "/_tfio/buckets/{BucketName}/{**Prefix}"
+@layout AppLayout
+@attribute [Microsoft.AspNetCore.Authorization.Authorize]
+@using System.Security.Claims
+@using TinyFileIO.Models.Api.Buckets
+@using TinyFileIO.Services.BackgroundJobs
+@using Microsoft.AspNetCore.Components.Forms
+@inject IS3BucketService BucketSvc
+@inject IS3ObjectService ObjectSvc
+@inject IAuthorizationProvider Authz
+@inject IPresignedUrlService Presigned
+@inject IBackgroundJobQueue JobQueue
+@inject NavigationManager Nav
+@inject IJSRuntime JS
+
+<PageTitle>@(BucketName is null ? "Buckets" : BucketName) — TinyFileIO</PageTitle>
+
+<!-- ══════════════════════════════════════════════════════════════════
+     Breadcrumb / Page header
+══════════════════════════════════════════════════════════════════ -->
+<div class="page-header">
+    <h1>
+        @if (BucketName is null)
+        {
+            <span>Buckets</span>
+        }
+        else
+        {
+            <a href="/_tfio/buckets" class="bread-home" title="Buckets">🗄</a>
+            <span class="bread-sep">›</span>
+            <a href="/_tfio/buckets/@BucketName" class="bread-link">@BucketName</a>
+            @foreach (var (seg, href) in _breadcrumbs)
+            {
+                <span class="bread-sep">›</span>
+                <a href="@href" class="bread-link">@seg</a>
+            }
+        }
+    </h1>
+</div>
+
+<div class="page-drop-zone">
+
+<div @ref="_pageDropOverlayRef" class="page-drop-overlay">⬆ Drop files to upload</div>
+
+<div class="explorer-layout">
+
+    <!-- ── Left: list panel ─────────────────────────────────────────── -->
+    <div class="explorer-list-panel">
+
+        <!-- Toolbar -->
+        <div class="explorer-toolbar">
+            <label class="select-all-label" title="Toggle all">
+                <input type="checkbox" @bind="_allSelected" @bind:after="OnToggleAll" />
+            </label>
+
+            <input class="explorer-search" type="search" placeholder="Search…"
+                   @bind="_search" @bind:event="oninput" />
+
+            @if (BucketName is null && _isSuperAdmin)
+            {
+                <button class="tfio-btn tfio-btn-sm tfio-btn-secondary" type="button" @onclick="OpenAddBucket">
+                    ＋ New bucket
+                </button>
+            }
+
+            @if (BucketName is not null && _canAdd)
+            {
+                <button class="tfio-btn tfio-btn-sm tfio-btn-secondary" type="button" @onclick="OpenCreateFolder">
+                    📁 New folder
+                </button>
+                <button class="tfio-btn tfio-btn-sm" type="button" @onclick="OpenUpload">
+                    ⬆ Upload
+                </button>
+            }
+
+            @if (_selectedKeys.Count > 0)
+            {
+                <button class="tfio-btn tfio-btn-sm tfio-btn-secondary" type="button" @onclick="DownloadZipAsync">
+                    🗜 Download Zip (@_selectedKeys.Count)
+                </button>
+                @if (BucketName is not null)
+                {
+                    <button class="tfio-btn tfio-btn-sm btn-danger" type="button" @onclick="RequestDeleteSelected">
+                        🗑 Delete (@_selectedKeys.Count)
+                    </button>
+                }
+            }
+        </div>
+
+        <!-- List -->
+        <div class="explorer-list">
+            @if (_loading)
+            {
+                <div class="explorer-empty">Loading…</div>
+            }
+            else if (_error is not null)
+            {
+                <div class="tfio-error" style="margin:.5rem">@_error</div>
+            }
+            else if (_visibleItems.Count == 0)
+            {
+                <div class="explorer-empty">
+                    @(string.IsNullOrEmpty(_search) ? "Empty." : "No results.")
+                </div>
+            }
+            else
+            {
+                @foreach (var item in _visibleItems)
+                {
+                    var isSelected = _selectedKeys.Contains(item.Key);
+                    var isActive   = _detail?.Key == item.Key;
+                    <div class="explorer-row @(isActive ? "active" : "")"
+                         @onclick="() => ShowDetail(item)"
+                         @ondblclick="() => OpenItem(item)">
+
+                        <label class="row-check" @onclick:stopPropagation="true">
+                            <input type="checkbox" checked="@isSelected"
+                                   @onchange="e => ToggleSelect(item, (bool)(e.Value ?? false))" />
+                        </label>
+
+                        <span class="row-icon" @onclick:stopPropagation="true" @onclick="() => OpenItem(item)">@ItemIcon(item)</span>
+
+                        <span class="row-name" @onclick:stopPropagation="true" @onclick="() => OpenItem(item)">@item.DisplayName</span>
+
+                        <span class="row-size">@FormatSize(item.Size)</span>
+
+                        <span class="row-date">@FormatDate(item.Modified)</span>
+
+                        <span class="row-actions" @onclick:stopPropagation="true">
+                            @if (item.IsObject)
+                            {
+                                <button class="tfio-btn tfio-btn-sm tfio-btn-secondary"
+                                        title="Download" type="button"
+                                        @onclick="() => DownloadAsync(item)">⬇</button>
+                                @if (_canDelete)
+                                {
+                                    <button class="tfio-btn tfio-btn-sm btn-danger"
+                                            title="Delete" type="button"
+                                            @onclick="() => RequestDeleteSingle(item)">🗑</button>
+                                }
+                            }
+                        </span>
+                    </div>
+                }
+            }
+        </div>
+    </div>
+
+    <!-- ── Right: detail panel ──────────────────────────────────────── -->
+    <div class="explorer-detail-panel @(_detail is not null ? "open" : "")">
+        <button class="detail-close" type="button" @onclick="CloseDetail">✕</button>
+
+        @if (_detail is not null)
+        {
+            <div class="detail-icon">@ItemIcon(_detail)</div>
+            <div class="detail-name">@_detail.DisplayName</div>
+
+            <table class="tfio-table detail-table">
+                <tbody>
+                    @if (_detail.IsObject)
+                    {
+                        <tr><th>Full key</th><td><code>@_detail.Key</code></td></tr>
+                        <tr><th>Content type</th><td>@_detail.ContentType</td></tr>
+                        <tr><th>Size</th><td>@FormatSize(_detail.Size) (@_detail.Size.ToString("N0") bytes)</td></tr>
+                        <tr><th>Last modified</th><td>@_detail.Modified?.ToString("yyyy-MM-dd HH:mm:ss") UTC</td></tr>
+                        <tr><th>ETag</th><td><code class="break-all">@_detail.ETag</code></td></tr>
+                        @if (_detail.StorageClass is not null)
+                        {
+                            <tr><th>Storage class</th><td>@_detail.StorageClass</td></tr>
+                        }
+                    }
+                    else
+                    {
+                        <tr><th>Name</th><td>@_detail.DisplayName</td></tr>
+                        @if (_detail.Modified.HasValue)
+                        {
+                            <tr><th>Created</th><td>@_detail.Modified?.ToString("yyyy-MM-dd HH:mm:ss") UTC</td></tr>
+                        }
+                        <tr><th>Type</th><td>@(_detail.IsBucket ? "Bucket" : "Folder")</td></tr>
+                    }
+                </tbody>
+            </table>
+
+            <div class="detail-actions">
+                @if (_detail.IsObject)
+                {
+                    <button class="tfio-btn tfio-btn-sm" type="button"
+                            @onclick="() => DownloadAsync(_detail)">⬇ Download</button>
+                    @if (_canDelete)
+                    {
+                        <button class="tfio-btn tfio-btn-sm btn-danger" type="button"
+                                @onclick="() => RequestDeleteSingle(_detail)">🗑 Delete</button>
+                    }
+                }
+                else if (!_detail.IsBucket)
+                {
+                    <a class="tfio-btn tfio-btn-sm" href="@_detail.NavHref">📂 Open folder</a>
+                }
+                else
+                {
+                    <a class="tfio-btn tfio-btn-sm" href="@_detail.NavHref">📂 Open bucket</a>
+                    <button class="tfio-btn tfio-btn-sm tfio-btn-secondary" type="button"
+                            @onclick="() => OpenImportFromS3(_detail.Key)">⇣ Import from S3</button>
+                    @if (_isSuperAdmin)
+                    {
+                        <button class="tfio-btn tfio-btn-sm btn-danger" type="button"
+                                @onclick="() => RequestDeleteSingle(_detail)">🗑 Delete</button>
+                    }
+                }
+            </div>
+        }
+        else
+        {
+            <div class="detail-placeholder">Select an item to see details.</div>
+        }
+    </div>
+
+    <!-- Mobile backdrop -->
+    <div class="detail-backdrop @(_detail is not null ? "open" : "")" @onclick="CloseDetail"></div>
+</div>
+
+<!-- ── File preview modal ───────────────────────────────────────────── -->
+<FilePreviewModal @ref="_previewModal" />
+
+</div> <!-- /page-drop-zone -->
+
+<!-- ══════════════════════════════════════════════════════════════════
+     Add bucket modal
+══════════════════════════════════════════════════════════════════ -->
+@if (_showAddBucket)
+{
+    <div class="modal-backdrop" @onclick="CloseAddBucket">
+        <div class="modal" @onclick:stopPropagation="true">
+            <h3>New bucket</h3>
+            @if (_modalError is not null)
+            {
+                <div class="tfio-error mb-1">@_modalError</div>
+            }
+            <div class="tfio-field">
+                <label>Bucket name</label>
+                <input @bind="_modalName" @bind:event="oninput" type="text" placeholder="my-bucket"
+                       @onkeydown="OnAddBucketKeyDown" autofocus />
+            </div>
+            <div class="modal-actions">
+                <button class="tfio-btn tfio-btn-sm" type="button" @onclick="CreateBucketAsync"
+                        disabled="@(string.IsNullOrWhiteSpace(_modalName))">Create</button>
+                <button class="tfio-btn tfio-btn-sm tfio-btn-secondary" type="button" @onclick="CloseAddBucket">Cancel</button>
+            </div>
+        </div>
+    </div>
+}
+
+<!-- ══════════════════════════════════════════════════════════════════
+     Create folder modal
+══════════════════════════════════════════════════════════════════ -->
+@if (_showCreateFolder)
+{
+    <div class="modal-backdrop" @onclick="CloseCreateFolder">
+        <div class="modal" @onclick:stopPropagation="true">
+            <h3>New folder</h3>
+            @if (_modalError is not null)
+            {
+                <div class="tfio-error mb-1">@_modalError</div>
+            }
+            <div class="tfio-field">
+                <label>Folder name</label>
+                <input @bind="_modalName" @bind:event="oninput" type="text" placeholder="my-folder"
+                       @onkeydown="OnCreateFolderKeyDown" autofocus />
+            </div>
+            <div class="modal-actions">
+                <button class="tfio-btn tfio-btn-sm" type="button" @onclick="NavigateToVirtualFolder"
+                        disabled="@(string.IsNullOrWhiteSpace(_modalName))">Open</button>
+                <button class="tfio-btn tfio-btn-sm tfio-btn-secondary" type="button" @onclick="CloseCreateFolder">Cancel</button>
+            </div>
+        </div>
+    </div>
+}
+
+<!-- ══════════════════════════════════════════════════════════════════
+     Upload modal
+══════════════════════════════════════════════════════════════════ -->
+@if (_showUpload)
+{
+    <div class="modal-backdrop" @onclick="CloseUploadIfIdle">
+        <div class="modal modal-upload" @onclick:stopPropagation="true">
+            <h3>Upload files</h3>
+
+            <!-- Keep InputFile mounted while uploading; Blazor file streams are tied to this input. -->
+            <InputFile @ref="_inputFileRef" OnChange="OnFilesSelected" multiple class="upload-file-input-hidden" />
+
+            @if (!_uploading)
+            {
+
+                @if (_uploadQueue.Count > 0)
+                {
+                    <div class="upload-file-list">
+                        @foreach (var f in _uploadQueue)
+                        {
+                            <div class="upload-file-row">
+                                <span class="upload-file-icon">@ContentIcon(f.ContentType)</span>
+                                <span class="upload-file-name">@f.RelativePath</span>
+                                <span class="upload-file-size">@FormatSize(f.Size)</span>
+                                <button class="upload-file-remove" type="button"
+                                        @onclick="() => _uploadQueue.Remove(f)">✕</button>
+                            </div>
+                        }
+                    </div>
+                    <div class="modal-actions">
+                        <button class="tfio-btn tfio-btn-sm" type="button" @onclick="StartUploadAsync">
+                            ⬆ Upload @_uploadQueue.Count file(s)
+                        </button>
+                        <button class="tfio-btn tfio-btn-sm tfio-btn-secondary" type="button" @onclick="CloseUpload">Cancel</button>
+                    </div>
+                }
+                else
+                {
+                    <div class="explorer-empty">Drop files anywhere on the page to upload.</div>
+                    <div class="modal-actions">
+                        <button class="tfio-btn tfio-btn-sm tfio-btn-secondary" type="button" @onclick="CloseUpload">Cancel</button>
+                    </div>
+                }
+            }
+            else
+            {
+                <!-- Progress list -->
+                <div class="upload-file-list">
+                    @foreach (var f in _uploadQueue)
+                    {
+                        <div class="upload-file-row">
+                            <span class="upload-file-icon">@StatusIcon(f.Status)</span>
+                            <span class="upload-file-name">@f.RelativePath</span>
+                            <span class="upload-file-size @StatusClass(f.Status)">@StatusLabel(f.Status)</span>
+                        </div>
+                        @if (f.Status == UploadStatus.Uploading)
+                        {
+                            <div class="upload-progress-bar">
+                                <div class="upload-progress-fill" style="width:@(f.Progress)%"></div>
+                            </div>
+                        }
+                    }
+                </div>
+
+                @if (_uploadDone)
+                {
+                    @if (_skippedFiles.Count > 0)
+                    {
+                        <div class="tfio-error mt-1">
+                            <strong>Skipped (no update permission):</strong>
+                            <ul class="skipped-list">
+                                @foreach (var s in _skippedFiles)
+                                {
+                                    <li>@s</li>
+                                }
+                            </ul>
+                        </div>
+                    }
+                    <div class="modal-actions">
+                        <button class="tfio-btn tfio-btn-sm" type="button" @onclick="CloseUploadAndRefresh">Done</button>
+                    </div>
+                }
+            }
+        </div>
+    </div>
+}
+
+<!-- ══════════════════════════════════════════════════════════════════
+     Overwrite confirmation modal
+══════════════════════════════════════════════════════════════════ -->
+@if (_overwriteFile is not null)
+{
+    <div class="modal-backdrop" @onclick:stopPropagation="true" style="z-index:1100">
+        <div class="modal" @onclick:stopPropagation="true">
+            <h3>File already exists</h3>
+            <p><strong>@_overwriteFile.RelativePath</strong> already exists.</p>
+            <div class="modal-actions">
+                <button class="tfio-btn tfio-btn-sm" type="button"
+                        @onclick="() => ResolveOverwrite(OverwriteChoice.Overwrite)">Overwrite</button>
+                <button class="tfio-btn tfio-btn-sm" type="button"
+                        @onclick="() => ResolveOverwrite(OverwriteChoice.OverwriteAll)">Overwrite all</button>
+                <button class="tfio-btn tfio-btn-sm tfio-btn-secondary" type="button"
+                        @onclick="() => ResolveOverwrite(OverwriteChoice.Skip)">Skip</button>
+                <button class="tfio-btn tfio-btn-sm tfio-btn-secondary" type="button"
+                        @onclick="() => ResolveOverwrite(OverwriteChoice.SkipAll)">Skip all</button>
+            </div>
+        </div>
+    </div>
+}
+
+<!-- ══════════════════════════════════════════════════════════════════
+     Import from S3 modal
+══════════════════════════════════════════════════════════════════ -->
+@if (_showImportFromS3)
+{
+    <div class="modal-backdrop" @onclick="CloseImportFromS3">
+        <div class="modal" @onclick:stopPropagation="true">
+            <h3>Import from S3</h3>
+            @if (_modalError is not null)
+            {
+                <div class="tfio-error mb-1">@_modalError</div>
+            }
+            @if (_importQueuedId is not null)
+            {
+                <div class="tfio-success mb-1">Import job queued: @_importQueuedId</div>
+            }
+            <div class="tfio-field">
+                <label>Server URL</label>
+                <input @bind="_importServerUrl" @bind:event="oninput" type="url" placeholder="https://s3.example.com" />
+            </div>
+            <div class="tfio-field">
+                <label>Username</label>
+                <input @bind="_importUsername" @bind:event="oninput" type="text" placeholder="Access key" />
+            </div>
+            <div class="tfio-field">
+                <label>Key</label>
+                <input @bind="_importKey" @bind:event="oninput" type="password" placeholder="Secret key" />
+            </div>
+            <div class="tfio-field">
+                <label>Bucket name</label>
+                <input @bind="_importSourceBucket" @bind:event="oninput" type="text" placeholder="source-bucket" />
+            </div>
+            <div class="tfio-field">
+                <label>Duplicates</label>
+                <select @bind="_importDuplicateMode">
+                    <option value="Overwrite">Overwrite</option>
+                    <option value="Skip">Skip</option>
+                    <option value="Rename">Rename</option>
+                </select>
+            </div>
+            <div class="modal-actions">
+                <button class="tfio-btn tfio-btn-sm" type="button" @onclick="QueueImportFromS3Async"
+                        disabled="@_importQueueing">@(_importQueueing ? "Queueing…" : "Queue import")</button>
+                <button class="tfio-btn tfio-btn-sm tfio-btn-secondary" type="button" @onclick="CloseImportFromS3">Close</button>
+            </div>
+        </div>
+    </div>
+}
+
+<!-- ══════════════════════════════════════════════════════════════════
+     Delete confirmation modal
+══════════════════════════════════════════════════════════════════ -->
+@if (_deleteTarget is not null)
+{
+    <div class="modal-backdrop" @onclick="CancelDelete">
+        <div class="modal" @onclick:stopPropagation="true">
+            <h3>Confirm delete</h3>
+            @if (_deleteBatch)
+            {
+                <p>Delete <strong>@_selectedKeys.Count selected object(s)</strong>? This cannot be undone.</p>
+            }
+            else
+            {
+                <p>Delete <strong>@_deleteTarget.Key</strong>? This cannot be undone.</p>
+            }
+            <div class="modal-actions">
+                <button class="tfio-btn btn-danger tfio-btn-sm" type="button"
+                        @onclick="ConfirmDeleteAsync" disabled="@_deleting">
+                    @(_deleting ? "Deleting…" : "Yes, delete")
+                </button>
+                <button class="tfio-btn tfio-btn-secondary tfio-btn-sm" type="button" @onclick="CancelDelete">Cancel</button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    // ── Parameters ──────────────────────────────────────────────────────────
+    [Parameter] public string? BucketName { get; set; }
+    [Parameter] public string? Prefix     { get; set; }
+
+    [CascadingParameter] private Task<AuthenticationState>? AuthState { get; set; }
+
+    // ── Identity / permissions ───────────────────────────────────────────────
+    private bool   _loading      = true;
+    private string? _error;
+    private bool   _isSuperAdmin;
+    private bool   _canDelete;
+    private bool   _canAdd;
+    private bool   _canUpdate;
+    private string _userId       = string.Empty;
+    private string _username     = string.Empty;
+
+    // ── List state ───────────────────────────────────────────────────────────
+    private List<ExplorerItem> _items        = [];
+    private HashSet<string>    _selectedKeys  = [];
+    private string             _search        = string.Empty;
+    private bool               _allSelected;
+    private ExplorerItem?      _detail;
+    private List<(string Seg, string Href)> _breadcrumbs = [];
+
+    // ── Add bucket modal ─────────────────────────────────────────────────────
+    private bool    _showAddBucket;
+
+    // ── Create folder modal ──────────────────────────────────────────────────
+    private bool    _showCreateFolder;
+
+    // shared modal fields
+    private string  _modalName  = string.Empty;
+    private string? _modalError;
+
+    // ── Delete ───────────────────────────────────────────────────────────────
+    private ExplorerItem? _deleteTarget;
+    private bool          _deleteBatch;
+    private bool          _deleting;
+
+    // ── Upload ───────────────────────────────────────────────────────────────
+    private bool                 _showUpload;
+    private bool                 _uploading;
+    private bool                 _uploadDone;
+    private List<UploadEntry>    _uploadQueue  = [];
+    private List<string>         _skippedFiles = [];
+    private UploadEntry?         _overwriteFile;
+    private TaskCompletionSource<OverwriteChoice>? _overwriteTcs;
+    private bool                 _overwriteAll;
+    private bool                 _skipAll;
+
+    // ── Import from S3 ───────────────────────────────────────────────────────
+    private bool    _showImportFromS3;
+    private bool    _importQueueing;
+    private string? _importTargetBucket;
+    private string? _importQueuedId;
+    private string  _importServerUrl     = string.Empty;
+    private string  _importUsername      = string.Empty;
+    private string  _importKey           = string.Empty;
+    private string  _importSourceBucket  = string.Empty;
+    private string  _importDuplicateMode = DownloadDuplicateModes.Overwrite;
+
+    // ── Computed ─────────────────────────────────────────────────────────────
+    private List<ExplorerItem> _visibleItems =>
+        string.IsNullOrWhiteSpace(_search)
+            ? _items
+            : _items.Where(i => i.DisplayName.Contains(_search, StringComparison.OrdinalIgnoreCase)).ToList();
+
+    private string CurrentPrefix => string.IsNullOrEmpty(Prefix) ? ""
+        : (Prefix.EndsWith('/') ? Prefix : Prefix + "/");
+
+    // ── Lifecycle ────────────────────────────────────────────────────────────
+    protected override async Task OnParametersSetAsync()
+    {
+        _loading      = true;
+        _error        = null;
+        _detail       = null;
+        _selectedKeys.Clear();
+        _allSelected  = false;
+        _search       = string.Empty;
+        _items        = [];
+        _canAdd       = false;
+        _canUpdate    = false;
+        _canDelete    = false;
+        ResetUploadState();
+
+        if (AuthState is not null)
+        {
+            var state     = await AuthState;
+            _userId       = state.User.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+            _username     = state.User.FindFirstValue(ClaimTypes.Name) ?? _userId;
+            _isSuperAdmin = state.User.FindFirstValue("is_super_admin") == "true";
+        }
+
+        BuildBreadcrumbs();
+
+        try
+        {
+            if (BucketName is null)
+                await LoadBucketsAsync();
+            else
+                await LoadObjectsAsync();
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+
+        _loading = false;
+    }
+
+    private void BuildBreadcrumbs()
+    {
+        _breadcrumbs.Clear();
+        if (BucketName is null || string.IsNullOrEmpty(Prefix)) return;
+        var segments = Prefix.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        var accum    = string.Empty;
+        foreach (var seg in segments)
+        {
+            accum = string.IsNullOrEmpty(accum) ? seg + "/" : accum + seg + "/";
+            _breadcrumbs.Add((seg, $"/_tfio/buckets/{BucketName}/{accum}"));
+        }
+    }
+
+    // ── Load buckets ─────────────────────────────────────────────────────────
+    private async Task LoadBucketsAsync()
+    {
+        var identity  = CallerIdentity();
+        var response  = await BucketSvc.ListBucketsAsync(identity.UserId);
+        var accessible = new List<ExplorerItem>();
+        foreach (var b in response.Buckets)
+        {
+            if (identity.IsSuperAdmin) { accessible.Add(BucketItem(b)); continue; }
+            var acl = await Authz.CheckAccessAsync(identity, b.Name, BucketPermission.Read);
+            if (acl == AclCheckResult.Allowed) accessible.Add(BucketItem(b));
+        }
+        _items = accessible.OrderBy(i => i.DisplayName, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private static ExplorerItem BucketItem(BucketEntry b) => new()
+    {
+        Key         = b.Name,
+        DisplayName = b.Name,
+        IsObject    = false,
+        IsBucket    = true,
+        Modified    = DateTime.TryParse(b.CreationDate, out var dt) ? dt.ToUniversalTime() : null,
+        NavHref     = $"/_tfio/buckets/{b.Name}"
+    };
+
+    // ── Load objects ─────────────────────────────────────────────────────────
+    private async Task LoadObjectsAsync()
+    {
+        var identity = CallerIdentity();
+
+        if (!identity.IsSuperAdmin)
+        {
+            var read = await Authz.CheckAccessAsync(identity, BucketName!, BucketPermission.Read);
+            if (read != AclCheckResult.Allowed) { _error = "You do not have read access to this bucket."; return; }
+        }
+
+        _canDelete = identity.IsSuperAdmin || (await Authz.CheckAccessAsync(identity, BucketName!, BucketPermission.Delete)) == AclCheckResult.Allowed;
+        _canAdd    = identity.IsSuperAdmin || (await Authz.CheckAccessAsync(identity, BucketName!, BucketPermission.Add))    == AclCheckResult.Allowed;
+        _canUpdate = identity.IsSuperAdmin || (await Authz.CheckAccessAsync(identity, BucketName!, BucketPermission.Update)) == AclCheckResult.Allowed;
+
+        var prefix = CurrentPrefix;
+        var req    = new ListObjectsV2Request { Prefix = prefix, Delimiter = "/", MaxKeys = 1000 };
+        var resp   = await BucketSvc.ListObjectsV2Async(BucketName!, req);
+
+        var list = new List<ExplorerItem>();
+
+        foreach (var cp in resp.CommonPrefixes)
+        {
+            var folderKey = cp.Prefix;
+            var display   = folderKey.TrimEnd('/');
+            if (!string.IsNullOrEmpty(prefix)) display = display[prefix.Length..];
+            list.Add(new ExplorerItem
+            {
+                Key         = folderKey,
+                DisplayName = display,
+                IsObject    = false,
+                IsBucket    = false,
+                NavHref     = $"/_tfio/buckets/{BucketName}/{folderKey}"
+            });
+        }
+
+        foreach (var obj in resp.Contents)
+        {
+            if (obj.Key == prefix) continue;
+            var displayName = obj.Key;
+            if (!string.IsNullOrEmpty(prefix) && displayName.StartsWith(prefix))
+                displayName = displayName[prefix.Length..];
+
+            string contentType = "application/octet-stream", etag = obj.ETag;
+            string? storageClass = obj.StorageClass;
+            try
+            {
+                var head = await ObjectSvc.HeadObjectAsync(new Models.Api.Objects.GetObjectRequest { Bucket = BucketName!, Key = obj.Key });
+                if (head is not null) { contentType = head.ContentType; etag = head.ETag; storageClass = head.StorageClass; }
+            }
+            catch { /* best effort */ }
+
+            list.Add(new ExplorerItem
+            {
+                Key          = obj.Key,
+                DisplayName  = displayName,
+                IsObject     = true,
+                Size         = obj.Size,
+                Modified     = DateTime.TryParse(obj.LastModified, out var dt) ? dt.ToUniversalTime() : null,
+                ContentType  = contentType,
+                ETag         = etag,
+                StorageClass = storageClass
+            });
+        }
+
+        _items = list.OrderBy(i => i.DisplayName, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    // ── Selection ────────────────────────────────────────────────────────────
+    private void ToggleSelect(ExplorerItem item, bool value)
+    {
+        if (value) _selectedKeys.Add(item.Key);
+        else       _selectedKeys.Remove(item.Key);
+        _allSelected = _items.Count > 0 && _items.All(i => _selectedKeys.Contains(i.Key));
+    }
+
+    private void OnToggleAll()
+    {
+        _selectedKeys.Clear();
+        if (_allSelected) foreach (var i in _items) _selectedKeys.Add(i.Key);
+    }
+
+    // ── Detail ───────────────────────────────────────────────────────────────
+    private void ShowDetail(ExplorerItem item) => _detail = _detail?.Key == item.Key ? null : item;
+    private void CloseDetail() => _detail = null;
+
+    private FilePreviewModal? _previewModal;
+
+    private void OpenItem(ExplorerItem item)
+    {
+        if (!item.IsObject)
+        {
+            Nav.NavigateTo(item.NavHref);
+            return;
+        }
+
+        var previewItem = new FilePreviewModal.PreviewItem
+        {
+            DisplayName = item.DisplayName,
+            ContentType = item.ContentType,
+            PreviewUrl  = BuildPresignedUrl(BucketName!, item.Key)
+        };
+
+        var allPreviewItems = _visibleItems
+            .Where(i => i.IsObject)
+            .Select(i => i.Key == item.Key ? previewItem : new FilePreviewModal.PreviewItem
+            {
+                DisplayName = i.DisplayName,
+                ContentType = i.ContentType,
+                PreviewUrl  = BuildPresignedUrl(BucketName!, i.Key)
+            })
+            .ToList();
+
+        _ = _previewModal?.OpenAsync(previewItem, allPreviewItems);
+    }
+
+    // ── Download ─────────────────────────────────────────────────────────────
+    private async Task DownloadAsync(ExplorerItem item)
+    {
+        if (!item.IsObject || BucketName is null) return;
+        var url = BuildPresignedUrl(BucketName, item.Key) + "&download=1";
+        await JS.InvokeVoidAsync("tfioDownload", url, item.DisplayName);
+    }
+
+    private async Task DownloadZipAsync()
+    {
+        if (_selectedKeys.Count == 0) return;
+
+        if (BucketName is null)
+        {
+            await JS.InvokeVoidAsync("tfioDownloadZip", string.Empty, _selectedKeys.ToArray(), "buckets.zip");
+        }
+        else
+        {
+            var keys    = _selectedKeys.ToArray();
+            var zipName = (string.IsNullOrEmpty(Prefix) ? BucketName : Prefix.Trim('/')) + ".zip";
+            await JS.InvokeVoidAsync("tfioDownloadZip", BucketName, keys, zipName);
+        }
+    }
+
+    // ── Add bucket ───────────────────────────────────────────────────────────
+    private void OpenAddBucket()  { _modalName = string.Empty; _modalError = null; _showAddBucket = true; }
+    private void CloseAddBucket() { _showAddBucket = false; }
+
+    private async Task OnAddBucketKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" && !string.IsNullOrWhiteSpace(_modalName)) await CreateBucketAsync();
+        else if (e.Key == "Escape") CloseAddBucket();
+    }
+
+    private async Task CreateBucketAsync()
+    {
+        _modalError = null;
+        var name = _modalName.Trim();
+        if (string.IsNullOrEmpty(name)) return;
+        try
+        {
+            await BucketSvc.CreateBucketAsync(name, region: null, ownerId: _userId);
+            CloseAddBucket();
+            await OnParametersSetAsync();
+        }
+        catch (Exception ex) { _modalError = ex.Message; }
+    }
+
+    // ── Create folder ────────────────────────────────────────────────────────
+    private void OpenCreateFolder()  { _modalName = string.Empty; _modalError = null; _showCreateFolder = true; }
+    private void CloseCreateFolder() { _showCreateFolder = false; }
+
+    private async Task OnCreateFolderKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" && !string.IsNullOrWhiteSpace(_modalName)) await NavigateToVirtualFolder();
+        else if (e.Key == "Escape") CloseCreateFolder();
+    }
+
+    private async Task NavigateToVirtualFolder()
+    {
+        _modalError = null;
+        var name = _modalName.Trim().Trim('/');
+        if (string.IsNullOrEmpty(name)) return;
+
+        // Reject names with path separators
+        if (name.Contains('/')) { _modalError = "Folder name must not contain '/'."; return; }
+
+        // Check for duplicate at current level
+        var folderKey = CurrentPrefix + name + "/";
+        var exists    = _items.Any(i => !i.IsObject && i.Key == folderKey);
+        if (exists) { _modalError = "A folder with that name already exists."; return; }
+
+        CloseCreateFolder();
+        Nav.NavigateTo($"/_tfio/buckets/{BucketName}/{folderKey}");
+        await Task.CompletedTask;
+    }
+
+    // ── Page-level drag-and-drop ──────────────────────────────────────────────
+    private InputFile?  _inputFileRef;
+    private ElementReference _pageDropOverlayRef;
+    private bool        _dropRegistered;
+    private bool        _pendingApplyDrop;
+    private DotNetObjectReference<Buckets>? _dropRef;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        // Re-register whenever we enter a bucket with upload rights.
+        var shouldRegister = BucketName is not null && (_canAdd || _canUpdate);
+        if (shouldRegister && !_dropRegistered)
+            await RegisterDropAsync();
+        else if (!shouldRegister && _dropRegistered)
+            await UnregisterDropAsync();
+
+        if (_pendingApplyDrop && _inputFileRef is not null)
+        {
+            _pendingApplyDrop = false;
+            await JS.InvokeVoidAsync("tfioApplyDropFiles", _inputFileRef.Element);
+        }
+    }
+
+    private async Task RegisterDropAsync()
+    {
+        _dropRef?.Dispose();
+        _dropRef = DotNetObjectReference.Create(this);
+        await JS.InvokeVoidAsync("tfioRegisterDrop", _dropRef, _pageDropOverlayRef);
+        _dropRegistered = true;
+    }
+
+    private async Task UnregisterDropAsync()
+    {
+        try { await JS.InvokeVoidAsync("tfioUnregisterDrop"); } catch { }
+        _dropRef?.Dispose();
+        _dropRef = null;
+        _dropRegistered = false;
+    }
+
+    [JSInvokable]
+    public void OnPageDrop()
+    {
+        OpenUpload();
+        _pendingApplyDrop = true;
+        StateHasChanged();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _dropRef?.Dispose();
+        try { await JS.InvokeVoidAsync("tfioUnregisterDrop"); } catch { }
+    }
+
+    // ── Upload ───────────────────────────────────────────────────────────────
+    private void OpenUpload()
+    {
+        _showUpload = true;
+    }
+
+    private void CloseUpload()
+    {
+        _showUpload = false;
+        ResetUploadState();
+    }
+
+    private void CloseUploadIfIdle()      { if (!_uploading) CloseUpload(); }
+    private async Task CloseUploadAndRefresh() { CloseUpload(); await OnParametersSetAsync(); }
+
+    private void ResetUploadState()
+    {
+        _uploadQueue  = [];
+        _skippedFiles = [];
+        _uploading    = false;
+        _uploadDone   = false;
+        _overwriteFile = null;
+        _overwriteTcs  = null;
+        _overwriteAll  = false;
+        _skipAll       = false;
+    }
+
+    private void OnFilesSelected(InputFileChangeEventArgs e)
+        => AddFilesToUploadQueue(e);
+
+    private void AddFilesToUploadQueue(InputFileChangeEventArgs e)
+    {
+        foreach (var file in e.GetMultipleFiles(500))
+        {
+            // Derive relative path (browsers may provide webkitRelativePath via name when folder upload)
+            var rel = file.Name;
+            var ct  = string.IsNullOrEmpty(file.ContentType) ? "application/octet-stream" : file.ContentType;
+
+            // Avoid exact duplicates
+            if (_uploadQueue.Any(q => q.RelativePath == rel)) continue;
+
+            _uploadQueue.Add(new UploadEntry
+            {
+                File         = file,
+                RelativePath = rel,
+                Size         = file.Size,
+                ContentType  = ct,
+                Status       = UploadStatus.Pending
+            });
+        }
+
+        StateHasChanged();
+    }
+
+    private async Task StartUploadAsync()
+    {
+        _uploading    = true;
+        _uploadDone   = false;
+        _overwriteAll = false;
+        _skipAll      = false;
+        _skippedFiles = [];
+
+        // Pre-fetch all existing keys under current prefix once
+        var existingKeys = new HashSet<string>();
+        try
+        {
+            var listReq = new ListObjectsV2Request { Prefix = CurrentPrefix, MaxKeys = 1000 };
+            ListObjectsV2Response? listResp;
+            do
+            {
+                listResp = await BucketSvc.ListObjectsV2Async(BucketName!, listReq);
+                foreach (var o in listResp.Contents) existingKeys.Add(o.Key);
+                listReq.ContinuationToken = listResp.NextContinuationToken;
+            } while (listResp.IsTruncated);
+        }
+        catch { /* best effort */ }
+
+        foreach (var entry in _uploadQueue)
+        {
+            var objectKey = CurrentPrefix + entry.RelativePath;
+
+            if (existingKeys.Contains(objectKey))
+            {
+                if (_skipAll)
+                {
+                    entry.Status = UploadStatus.Skipped;
+                    _skippedFiles.Add(entry.RelativePath);
+                    StateHasChanged();
+                    continue;
+                }
+
+                if (!_canUpdate)
+                {
+                    entry.Status = UploadStatus.Skipped;
+                    _skippedFiles.Add(entry.RelativePath);
+                    StateHasChanged();
+                    continue;
+                }
+
+                if (!_overwriteAll)
+                {
+                    var choice = await AskOverwrite(entry);
+                    switch (choice)
+                    {
+                        case OverwriteChoice.Skip:
+                            entry.Status = UploadStatus.Skipped;
+                            _skippedFiles.Add(entry.RelativePath);
+                            StateHasChanged();
+                            continue;
+                        case OverwriteChoice.SkipAll:
+                            _skipAll     = true;
+                            entry.Status = UploadStatus.Skipped;
+                            _skippedFiles.Add(entry.RelativePath);
+                            StateHasChanged();
+                            continue;
+                        case OverwriteChoice.OverwriteAll:
+                            _overwriteAll = true;
+                            break;
+                        // OverwriteChoice.Overwrite → fall through
+                    }
+                }
+            }
+
+            entry.Status   = UploadStatus.Uploading;
+            entry.Progress = 0;
+            StateHasChanged();
+
+            try
+            {
+                await using var stream = entry.File!.OpenReadStream(maxAllowedSize: 2L * 1024 * 1024 * 1024);
+                var req = new Models.Api.Objects.PutObjectRequest
+                {
+                    Bucket      = BucketName!,
+                    Key         = objectKey,
+                    ContentType = entry.ContentType
+                };
+                await ObjectSvc.PutObjectAsync(req, stream);
+                entry.Status   = UploadStatus.Done;
+                entry.Progress = 100;
+            }
+            catch (Exception ex)
+            {
+                entry.Status      = UploadStatus.Error;
+                entry.ErrorDetail = ex.Message;
+            }
+
+            StateHasChanged();
+        }
+
+        _uploadDone = true;
+        StateHasChanged();
+    }
+
+    private async Task<OverwriteChoice> AskOverwrite(UploadEntry entry)
+    {
+        _overwriteFile = entry;
+        _overwriteTcs  = new TaskCompletionSource<OverwriteChoice>();
+        StateHasChanged();
+        var result = await _overwriteTcs.Task;
+        _overwriteFile = null;
+        StateHasChanged();
+        return result;
+    }
+
+    private void ResolveOverwrite(OverwriteChoice choice) => _overwriteTcs?.TrySetResult(choice);
+
+    // ── Import from S3 ───────────────────────────────────────────────────────
+    private void OpenImportFromS3(string targetBucket)
+    {
+        _importTargetBucket = targetBucket;
+        _importServerUrl = string.Empty;
+        _importUsername = string.Empty;
+        _importKey = string.Empty;
+        _importSourceBucket = string.Empty;
+        _importDuplicateMode = DownloadDuplicateModes.Overwrite;
+        _importQueuedId = null;
+        _modalError = null;
+        _showImportFromS3 = true;
+    }
+
+    private void CloseImportFromS3()
+    {
+        _showImportFromS3 = false;
+        _importQueueing = false;
+        _importQueuedId = null;
+    }
+
+    private async Task QueueImportFromS3Async()
+    {
+        _modalError = null;
+        if (string.IsNullOrWhiteSpace(_importTargetBucket)
+            || string.IsNullOrWhiteSpace(_importServerUrl)
+            || string.IsNullOrWhiteSpace(_importUsername)
+            || string.IsNullOrWhiteSpace(_importKey)
+            || string.IsNullOrWhiteSpace(_importSourceBucket))
+        {
+            _modalError = "All fields are required.";
+            return;
+        }
+
+        if (!Uri.TryCreate(_importServerUrl.Trim(), UriKind.Absolute, out _))
+        {
+            _modalError = "Server URL must be an absolute URL.";
+            return;
+        }
+
+        _importQueueing = true;
+        try
+        {
+            var parameters = new DownloadJobParameters
+            {
+                ServerUrl = _importServerUrl.Trim(),
+                Username = _importUsername.Trim(),
+                Key = _importKey,
+                SourceBucket = _importSourceBucket.Trim(),
+                TargetBucket = _importTargetBucket,
+                DuplicateMode = _importDuplicateMode
+            };
+
+            var id = await JobQueue.EnqueueAsync(DownloadJob.Type, parameters, _importTargetBucket, _userId, _username);
+            _importQueuedId = id.ToString();
+        }
+        catch (Exception ex)
+        {
+            _modalError = ex.Message;
+        }
+        finally
+        {
+            _importQueueing = false;
+        }
+    }
+
+    // ── Delete ───────────────────────────────────────────────────────────────
+    private void RequestDeleteSingle(ExplorerItem item) { _deleteTarget = item; _deleteBatch = false; }
+    private void RequestDeleteSelected()
+    {
+        if (_selectedKeys.Count == 0) return;
+        _deleteTarget = new ExplorerItem { Key = "(batch)" };
+        _deleteBatch  = true;
+    }
+    private void CancelDelete() { _deleteTarget = null; _deleteBatch = false; _deleting = false; }
+
+    private async Task ConfirmDeleteAsync()
+    {
+        _deleting = true;
+        try
+        {
+            if (_deleteBatch)
+            {
+                foreach (var key in _selectedKeys.ToList())
+                    await DeleteObjectAndPruneAsync(key);
+                _selectedKeys.Clear();
+            }
+            else if (_deleteTarget is not null)
+            {
+                if (_deleteTarget.IsBucket)
+                    await BucketSvc.DeleteBucketAsync(_deleteTarget.Key);
+                else if (_deleteTarget.IsObject)
+                    await DeleteObjectAndPruneAsync(_deleteTarget.Key);
+                else
+                    await DeletePrefixAsync(_deleteTarget.Key);
+            }
+            CancelDelete();
+            await OnParametersSetAsync();
+        }
+        catch (Exception ex) { _error = ex.Message; _deleting = false; }
+    }
+
+    private async Task DeleteObjectAndPruneAsync(string key)
+    {
+        await ObjectSvc.DeleteObjectAsync(new Models.Api.Objects.DeleteObjectRequest { Bucket = BucketName!, Key = key });
+
+        // After deleting, check if the parent folder (up to but not including the bucket root) is now empty
+        var slashIdx = key.LastIndexOf('/');
+        if (slashIdx <= 0) return; // no parent folder
+        var parentPrefix = key[..(slashIdx + 1)];
+        if (parentPrefix == CurrentPrefix) return; // don't prune the current view prefix
+
+        var checkReq  = new ListObjectsV2Request { Prefix = parentPrefix, MaxKeys = 1 };
+        var checkResp = await BucketSvc.ListObjectsV2Async(BucketName!, checkReq);
+        if (checkResp.Contents.Count == 0 && checkResp.CommonPrefixes.Count == 0)
+        {
+            // Folder is empty — nothing to delete (virtual folder, no placeholder object needed)
+            // The folder will automatically disappear from listings
+        }
+    }
+
+    private async Task DeletePrefixAsync(string prefix)
+    {
+        var req = new ListObjectsV2Request { Prefix = prefix, MaxKeys = 1000 };
+        ListObjectsV2Response? resp;
+        do
+        {
+            resp = await BucketSvc.ListObjectsV2Async(BucketName!, req);
+            foreach (var obj in resp.Contents)
+                await ObjectSvc.DeleteObjectAsync(new Models.Api.Objects.DeleteObjectRequest { Bucket = BucketName!, Key = obj.Key });
+            req.ContinuationToken = resp.NextContinuationToken;
+        } while (resp.IsTruncated);
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+    private CallerIdentity CallerIdentity() => new() { UserId = _userId, Username = _username, IsSuperAdmin = _isSuperAdmin };
+
+    private string BuildPresignedUrl(string bucket, string key)
+    {
+        var token = Presigned.Create("GET", bucket, key, _userId, _username, _isSuperAdmin, expiresInSeconds: 3600);
+        return $"/{bucket}/{key}?X-Tfio-Presign={Uri.EscapeDataString(token.Token)}";
+    }
+
+    private static string ItemIcon(ExplorerItem item)
+    {
+        if (item.IsBucket)  return "🗄";
+        if (!item.IsObject) return "📁";
+        return ContentIcon(item.ContentType);
+    }
+
+    private static string ContentIcon(string ct)
+    {
+        if (ct.StartsWith("image/"))  return "🖼";
+        if (ct.StartsWith("video/"))  return "🎬";
+        if (ct.StartsWith("audio/"))  return "🎵";
+        if (ct.Contains("pdf"))       return "📄";
+        if (ct.Contains("zip") || ct.Contains("tar") || ct.Contains("gzip") || ct.Contains("7z")) return "🗜";
+        if (ct.StartsWith("text/"))   return "📝";
+        if (ct.Contains("json") || ct.Contains("xml") || ct.Contains("javascript")) return "📋";
+        return "📦";
+    }
+
+    private static string FormatSize(long bytes)
+    {
+        if (bytes == 0) return string.Empty;
+        string[] s = ["B", "KB", "MB", "GB", "TB"];
+        int i = 0; double v = bytes;
+        while (v >= 1024 && i < s.Length - 1) { v /= 1024; i++; }
+        return i == 0 ? $"{bytes} B" : $"{v:F1} {s[i]}";
+    }
+
+    private static string FormatDate(DateTime? dt) =>
+        dt.HasValue ? dt.Value.ToString("yyyy-MM-dd HH:mm") : string.Empty;
+
+    private static string StatusIcon(UploadStatus s) => s switch
+    {
+        UploadStatus.Pending   => "⏳",
+        UploadStatus.Uploading => "⬆",
+        UploadStatus.Done      => "✅",
+        UploadStatus.Skipped   => "⏭",
+        UploadStatus.Error     => "❌",
+        _                      => "?"
+    };
+
+    private static string StatusLabel(UploadStatus s) => s switch
+    {
+        UploadStatus.Pending   => "Pending",
+        UploadStatus.Uploading => "Uploading…",
+        UploadStatus.Done      => "Done",
+        UploadStatus.Skipped   => "Skipped",
+        UploadStatus.Error     => "Error",
+        _                      => ""
+    };
+
+    private static string StatusClass(UploadStatus s) => s switch
+    {
+        UploadStatus.Done    => "status-done",
+        UploadStatus.Skipped => "status-skip",
+        UploadStatus.Error   => "status-error",
+        _                    => ""
+    };
+
+    // ── View-models ───────────────────────────────────────────────────────────
+    private sealed class ExplorerItem
+    {
+        public string    Key          { get; init; } = string.Empty;
+        public string    DisplayName  { get; set; }  = string.Empty;
+        public bool      IsObject     { get; init; }
+        public bool      IsBucket     { get; init; }
+        public long      Size         { get; init; }
+        public DateTime? Modified     { get; init; }
+        public string    ContentType  { get; init; } = string.Empty;
+        public string    ETag         { get; init; } = string.Empty;
+        public string?   StorageClass { get; init; }
+        public string    NavHref      { get; init; } = string.Empty;
+    }
+
+    private sealed class UploadEntry
+    {
+        public IBrowserFile? File         { get; init; }
+        public string        RelativePath { get; init; } = string.Empty;
+        public long          Size         { get; init; }
+        public string        ContentType  { get; init; } = string.Empty;
+        public UploadStatus  Status       { get; set; }  = UploadStatus.Pending;
+        public int           Progress     { get; set; }
+        public string?       ErrorDetail  { get; set; }
+    }
+
+    private enum UploadStatus  { Pending, Uploading, Done, Skipped, Error }
+    private enum OverwriteChoice { Overwrite, OverwriteAll, Skip, SkipAll }
+}

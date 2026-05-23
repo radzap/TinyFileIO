@@ -1,0 +1,170 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <base href="/" />
+    <ResourcePreloader />
+    <link rel="stylesheet" href="@Assets["_tfioassets/app.css"]" />
+    <link rel="stylesheet" href="@Assets["TinyFileIO.styles.css"]" />
+    <link rel="stylesheet" href="_tfioassets/tfio.css" />
+    <ImportMap />
+    <HeadOutlet @rendermode="InteractiveServer" />
+</head>
+
+<body>
+    <Routes @rendermode="InteractiveServer" />
+    <ReconnectModal />
+    <script src="_tfioassets/prism.min.js" type="text/javascript" data-manual></script>
+    <script src="_tfioassets/marked.min.js" type="text/javascript"></script>
+    <script src="@Assets["_framework/blazor.web.js"]"></script>
+    <script>
+        window.tfioDownload = function (url, filename) {
+            fetch(url)
+                .then(r => r.blob())
+                .then(blob => {
+                    const a = document.createElement('a');
+                    a.href = URL.createObjectURL(blob);
+                    a.download = filename || 'download';
+                    document.body.appendChild(a);
+                    a.click();
+                    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+                });
+        };
+
+        window.tfioDownloadZip = function (bucket, keys, zipName) {
+            fetch('/_tfio/api/download-zip', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ bucket: bucket, keys: keys })
+            }).then(function (r) {
+                if (!r.ok) { console.error('Download ZIP failed', r.status); return; }
+                return r.blob();
+            }).then(function (blob) {
+                if (!blob) return;
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = zipName || 'download.zip';
+                document.body.appendChild(a);
+                a.click();
+                setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+            });
+        };
+
+        // ── Page-level drag-and-drop ──────────────────────────────────────
+        // Files can only live in the browser, so JS stashes the dropped FileList,
+        // asks Blazor to open the modal, then injects them into the modal InputFile.
+        (function () {
+            let _stashedFiles = null;
+            let _dotnet = null;
+            let _overlayEl = null;
+            let _enterCount = 0;
+            let _registered = false;
+
+            window.tfioRegisterDrop = function (dotnetRef, overlayEl) {
+                window.tfioUnregisterDrop();
+                _dotnet = dotnetRef;
+                _overlayEl = overlayEl;
+                _enterCount = 0;
+
+                document.addEventListener('dragenter', onDragEnter, true);
+                document.addEventListener('dragover',  onDragOver,  true);
+                document.addEventListener('dragleave', onDragLeave, true);
+                document.addEventListener('drop',      onDrop,      true);
+                _registered = true;
+            };
+
+            function onDragEnter(e) {
+                if (!hasFiles(e)) return;
+                e.preventDefault();
+                _enterCount++;
+                if (_overlayEl) _overlayEl.classList.add('page-drop-active');
+            }
+
+            function onDragOver(e) {
+                if (!hasFiles(e)) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'copy';
+            }
+
+            function onDragLeave(e) {
+                if (!hasFiles(e)) return;
+                _enterCount--;
+                if (_enterCount <= 0) {
+                    _enterCount = 0;
+                    if (_overlayEl) _overlayEl.classList.remove('page-drop-active');
+                }
+            }
+
+            function onDrop(e) {
+                if (!hasFiles(e)) return;
+                e.preventDefault();
+                e.stopPropagation();
+                _enterCount = 0;
+                if (_overlayEl) _overlayEl.classList.remove('page-drop-active');
+                if (!e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
+
+                // Copy immediately while DataTransfer.files is still accessible.
+                // Some browsers clear/protect the original FileList after drop returns.
+                _stashedFiles = Array.from(e.dataTransfer.files);
+                _dotnet && _dotnet.invokeMethodAsync('OnPageDrop');
+            }
+
+            window.tfioApplyDropFiles = function (inputEl) {
+                if (!inputEl || !_stashedFiles || _stashedFiles.length === 0) return;
+
+                try {
+                    const dt = new DataTransfer();
+                    for (let i = 0; i < _stashedFiles.length; i++) dt.items.add(_stashedFiles[i]);
+                    inputEl.files = dt.files;
+                    setTimeout(function () {
+                        inputEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+                    }, 100);
+                } catch (ex) { console.warn('tfio drop:', ex); }
+                _stashedFiles = null;
+            };
+
+            function hasFiles(e) {
+                return e.dataTransfer && e.dataTransfer.types &&
+                    (e.dataTransfer.types.indexOf('Files') >= 0 ||
+                     e.dataTransfer.types.indexOf('application/x-moz-file') >= 0);
+            }
+
+                window.tfioUnregisterDrop = function () {
+                        if (!_registered) return;
+                        document.removeEventListener('dragenter', onDragEnter, true);
+                        document.removeEventListener('dragover',  onDragOver,  true);
+                        document.removeEventListener('dragleave', onDragLeave, true);
+                        document.removeEventListener('drop',      onDrop,      true);
+                        _dotnet = null;
+                        _stashedFiles = null;
+                        _overlayEl = null;
+                        _enterCount = 0;
+                        _registered = false;
+                    };
+                })();
+
+                // ── File preview keyboard navigation ─────────────────────────────────
+                (function () {
+                    let _previewDotnet = null;
+                    function _previewKeyHandler(e) {
+                        if (!_previewDotnet) return;
+                        if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Escape') {
+                            e.preventDefault();
+                            _previewDotnet.invokeMethodAsync('OnKeyDown', e.key);
+                        }
+                    }
+                    window.tfioPreviewRegisterKeys = function (dotnetRef) {
+                        _previewDotnet = dotnetRef;
+                        document.addEventListener('keydown', _previewKeyHandler);
+                    };
+                    window.tfioPreviewUnregisterKeys = function () {
+                        document.removeEventListener('keydown', _previewKeyHandler);
+                        _previewDotnet = null;
+                    };
+                })();
+            </script>
+</body>
+
+</html>

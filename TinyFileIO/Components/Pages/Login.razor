@@ -1,0 +1,61 @@
+@page "/_tfio/login"
+@layout TfioLayout
+@using Microsoft.AspNetCore.Authentication.Cookies
+@using Microsoft.EntityFrameworkCore
+@inject IDbContextFactory<TinyFileIO.Data.AppDbContext> DbFactory
+@inject IConfiguration Config
+@inject NavigationManager Nav
+
+@code {
+    [SupplyParameterFromQuery] public string? Error { get; set; }
+    [SupplyParameterFromQuery] public string? Created { get; set; }
+    [SupplyParameterFromQuery] public string? ReturnUrl { get; set; }
+
+    private bool _staticAllowed;
+    private bool _hasDbUsers;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _staticAllowed = Config.GetValue<bool>("UseStaticAccount");
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        _hasDbUsers = await db.Users.AnyAsync();
+
+        // If no static account and no DB users → redirect to setup
+        if (!_staticAllowed && !_hasDbUsers)
+            Nav.NavigateTo("/_tfio/setup", replace: true);
+    }
+}
+
+<PageTitle>Sign in — TinyFileIO</PageTitle>
+
+<div class="tfio-card">
+    <a href="/_tfio/login" class="tfio-logo">
+        <span class="tfio-logo-icon">TF</span>
+        TinyFileIO
+    </a>
+    <h2>Sign in</h2>
+
+    @if (Created == "1")
+    {
+        <p class="tfio-success">Admin account created. Please sign in.</p>
+    }
+
+    @if (Error == "1")
+    {
+        <p class="tfio-error">Invalid username or password.</p>
+    }
+
+    <form method="post" action="/_tfio/auth/login">
+        <input type="hidden" name="ReturnUrl" value="@ReturnUrl" />
+        <div class="tfio-field">
+            <label for="Username">Username</label>
+            <input id="Username" name="Username" type="text" autocomplete="username" required autofocus />
+        </div>
+        <div class="tfio-field">
+            <label for="Password">Password</label>
+            <input id="Password" name="Password" type="password" autocomplete="current-password" required />
+        </div>
+        <button type="submit" class="tfio-btn">Sign in</button>
+    </form>
+</div>

@@ -1,0 +1,11 @@
+﻿@page "/_tfio"
+@layout AppLayout
+@attribute [Microsoft.AspNetCore.Authorization.Authorize]
+@inject NavigationManager Nav
+
+@code {
+    protected override void OnInitialized()
+    {
+        Nav.NavigateTo("/_tfio/buckets", replace: true);
+    }
+}

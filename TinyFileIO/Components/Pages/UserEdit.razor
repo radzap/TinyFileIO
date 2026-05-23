@@ -1,0 +1,220 @@
+@page "/_tfio/users/{UserId:guid}"
+@layout AppLayout
+@attribute [Microsoft.AspNetCore.Authorization.Authorize]
+@using System.Security.Claims
+@inject IUserManagementService UserMgmt
+@inject IS3BucketService Buckets
+@inject NavigationManager Nav
+
+<PageTitle>Edit user — TinyFileIO</PageTitle>
+
+@if (!_isSuperAdmin)
+{
+    <div class="tfio-error">You do not have permission to manage users.</div>
+    return;
+}
+
+@if (_notFound)
+{
+    <div class="tfio-error">User not found.</div>
+    return;
+}
+
+@if (_user is null)
+{
+    <p class="text-muted">Loading…</p>
+    return;
+}
+
+<div class="page-header">
+    <div style="display:flex;align-items:center;gap:.75rem;">
+        <a href="/_tfio/users" class="tfio-btn tfio-btn-sm tfio-btn-secondary">← Back</a>
+        <div>
+            <h1>Edit user</h1>
+            <p>@_user.Username</p>
+        </div>
+    </div>
+</div>
+
+@if (_message is not null)
+{
+    <div class="@(_isError ? "tfio-error" : "tfio-success") mb-1">@_message</div>
+}
+
+<!-- ── Identity ───────────────────────────────────────────────────── -->
+<div class="panel mb-2">
+    <div class="panel-title"><span>Identity</span></div>
+    <div class="panel-body">
+        <div class="form-row">
+            <div class="tfio-field">
+                <label>Username</label>
+                <input @bind="_username" type="text" />
+            </div>
+            <div class="tfio-field tfio-field-inline">
+                <label>
+                    <input @bind="_isSuperAdminUser" type="checkbox"
+                           disabled="@(_user.Id.ToString() == _currentUserId)" />
+                    Super admin
+                </label>
+            </div>
+        </div>
+        <button class="tfio-btn tfio-btn-sm" @onclick="SaveIdentityAsync">Save identity</button>
+    </div>
+</div>
+
+<!-- ── Change password ────────────────────────────────────────────── -->
+<div class="panel mb-2">
+    <div class="panel-title"><span>Change password</span></div>
+    <div class="panel-body">
+        <div class="form-row">
+            <div class="tfio-field">
+                <label>New password</label>
+                <input @bind="_newPassword" type="password" />
+            </div>
+            <div class="tfio-field">
+                <label>Confirm password</label>
+                <input @bind="_confirmPassword" type="password" />
+            </div>
+        </div>
+        <button class="tfio-btn tfio-btn-sm" @onclick="SavePasswordAsync">Set password</button>
+    </div>
+</div>
+
+<!-- ── ACL — only shown for non-super-admin users ────────────────── -->
+@if (!_isSuperAdminUser)
+{
+    <div class="panel mb-2">
+        <div class="panel-title"><span>Access control</span></div>
+        <div class="panel-body p-0">
+            <table class="data-table acl-table">
+                <thead>
+                    <tr>
+                        <th>Scope</th>
+                        <th class="acl-col">All</th>
+                        <th class="acl-col">Read</th>
+                        <th class="acl-col">Add</th>
+                        <th class="acl-col">Update</th>
+                        <th class="acl-col">Delete</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var row in _aclRows)
+                    {
+                        <tr>
+                            <td>
+                                @if (row.BucketName is null)
+                                {
+                                    <span class="acl-global">⊛ Global (all buckets)</span>
+                                }
+                                else
+                                {
+                                    <span class="acl-bucket">🗄 @row.BucketName</span>
+                                }
+                            </td>
+                            <td class="acl-col">
+                                <input type="checkbox"
+                                       checked="@row.All"
+                                       @onchange="e => ToggleAll(row, (bool)e.Value!)" />
+                            </td>
+                            <td class="acl-col"><input type="checkbox" @bind="row.CanRead"   /></td>
+                            <td class="acl-col"><input type="checkbox" @bind="row.CanAdd"    /></td>
+                            <td class="acl-col"><input type="checkbox" @bind="row.CanUpdate" /></td>
+                            <td class="acl-col"><input type="checkbox" @bind="row.CanDelete" /></td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+        <div class="panel-body" style="border-top:1px solid var(--border);">
+            <button class="tfio-btn tfio-btn-sm" @onclick="SaveAclAsync">Save permissions</button>
+        </div>
+    </div>
+}
+else
+{
+    <div class="tfio-info-box">
+        <span class="info-icon">ℹ</span>
+        <div>ACL rules are not applicable to super-admin users — they have full access to everything.</div>
+    </div>
+}
+
+@code {
+    [Parameter] public Guid UserId { get; set; }
+    [CascadingParameter] private Task<AuthenticationState>? AuthState { get; set; }
+
+    private UserDto? _user;
+    private bool _notFound;
+    private bool _isSuperAdmin;   // current logged-in user
+    private string? _currentUserId;
+
+    private string _username        = string.Empty;
+    private bool   _isSuperAdminUser;
+    private string _newPassword     = string.Empty;
+    private string _confirmPassword = string.Empty;
+
+    private List<AclRowDto> _aclRows = [];
+
+    private string? _message;
+    private bool    _isError;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (AuthState is not null)
+        {
+            var s = await AuthState;
+            _currentUserId = s.User.FindFirstValue(ClaimTypes.NameIdentifier);
+            _isSuperAdmin  = s.User.FindFirstValue("is_super_admin") == "true";
+        }
+
+        if (!_isSuperAdmin) return;
+
+        _user = await UserMgmt.GetByIdAsync(UserId);
+        if (_user is null) { _notFound = true; return; }
+
+        _username        = _user.Username;
+        _isSuperAdminUser = _user.IsSuperAdmin;
+
+        var bucketsResp = await Buckets.ListBucketsAsync("admin");
+        var bucketNames = bucketsResp.Buckets.Select(b => b.Name);
+        _aclRows = await UserMgmt.GetAclRowsAsync(UserId, bucketNames);
+    }
+
+    private async Task SaveIdentityAsync()
+    {
+        var (ok1, err1) = await UserMgmt.UpdateUsernameAsync(UserId, _username);
+        if (!ok1) { SetMessage(err1!, true); return; }
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var entity = await db.Users.FindAsync(UserId);
+        if (entity is not null)
+        {
+            entity.IsSuperAdmin = _isSuperAdminUser;
+            await db.SaveChangesAsync();
+        }
+
+        _user = await UserMgmt.GetByIdAsync(UserId);
+        SetMessage("Identity saved.", false);
+    }
+
+    private async Task SavePasswordAsync()
+    {
+        if (_newPassword != _confirmPassword) { SetMessage("Passwords do not match.", true); return; }
+        var (ok, error) = await UserMgmt.UpdatePasswordAsync(UserId, _newPassword);
+        if (ok) { _newPassword = _confirmPassword = string.Empty; SetMessage("Password updated.", false); }
+        else SetMessage(error!, true);
+    }
+
+    private async Task SaveAclAsync()
+    {
+        var (ok, error) = await UserMgmt.SaveAclRowsAsync(UserId, _aclRows);
+        if (ok) SetMessage("Permissions saved.", false);
+        else SetMessage(error!, true);
+    }
+
+    private static void ToggleAll(AclRowDto row, bool value) => row.All = value;
+
+    private void SetMessage(string msg, bool isError) { _message = msg; _isError = isError; }
+
+    // Helper: we need EF access for super-admin toggle — resolve factory from DI
+    [Inject] private Microsoft.EntityFrameworkCore.IDbContextFactory<TinyFileIO.Data.AppDbContext> DbFactory { get; set; } = null!;
+}

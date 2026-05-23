@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="TinyFileIO.Tests/TinyFileIO.Tests.csproj" Id="66ea1b48-7a94-4598-a7ac-4ab560e239ea" />
+  <Project Path="TinyFileIO/TinyFileIO.csproj" />
+</Solution>

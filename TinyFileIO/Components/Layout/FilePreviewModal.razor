@@ -1,0 +1,218 @@
+@rendermode InteractiveServer
+@inject IJSRuntime JS
+@inject NavigationManager NavigationManager
+@implements IAsyncDisposable
+
+@if (_item is not null)
+{
+    <div class="preview-backdrop" @onclick="Close">
+        <div class="preview-modal" @onclick:stopPropagation="true">
+
+            <!-- Header -->
+            <div class="preview-header">
+                <button class="preview-nav-btn @(PrevItem is null ? "invisible" : "")"
+                        title="Previous" type="button"
+                        @onclick="NavigatePrev">&#8592;</button>
+
+                <span class="preview-title" title="@_item.DisplayName">@_item.DisplayName</span>
+
+                <button class="preview-nav-btn @(NextItem is null ? "invisible" : "")"
+                        title="Next" type="button"
+                        @onclick="NavigateNext">&#8594;</button>
+
+                <button class="preview-close" title="Close" type="button" @onclick="Close">&#10005;</button>
+            </div>
+
+            <!-- Content -->
+            <div class="preview-body">
+                @{
+                    var ct = _item.ContentType ?? string.Empty;
+                    var ext = Path.GetExtension(_item.DisplayName).TrimStart('.').ToLowerInvariant();
+                    var src = _item.PreviewUrl;
+                }
+
+                @if (ct.StartsWith("video/"))
+                {
+                    <video controls autoplay class="preview-media">
+                        <source src="@src" type="@ct" />
+                    </video>
+                }
+                else if (ct.StartsWith("audio/"))
+                {
+                    <audio controls class="preview-audio">
+                        <source src="@src" type="@ct" />
+                    </audio>
+                }
+                else if (ct.StartsWith("image/"))
+                {
+                    <img src="@src" alt="@_item.DisplayName" class="preview-image" />
+                }
+                else if (_IsCode(ext))
+                {
+                    <iframe id="preview-iframe-code" src="@src" frameborder="0" class="preview-iframe" @onload="OnCodeLoad"></iframe>
+                }
+                else if (ct == "application/pdf")
+                {
+                    <embed src="@src" type="@ct" class="preview-embed" />
+                }
+                else if (_IsMarkdown(ext) || ct.StartsWith("text/plain"))
+                {
+                    <iframe id="preview-iframe-md" src="@src" frameborder="0" class="preview-iframe" @onload="OnMdLoad"></iframe>
+                }
+                else
+                {
+                    <div class="preview-unsupported">
+                        <div class="preview-unsupported-icon">📦</div>
+                        <div>No preview available for this file type.</div>
+                    </div>
+                }
+            </div>
+        </div>
+    </div>
+}
+
+<script type="text/javascript">
+    window.AppLoadMarkdorw = function (iframeId, cssUrl) {
+        let iframeDoc = document.getElementById(iframeId).contentWindow.document;
+
+        if (cssUrl) {
+            let link = iframeDoc.createElement("link");
+            link.href = cssUrl;
+            link.rel = "stylesheet";
+            link.type = "text/css";
+            iframeDoc.head.appendChild(link);
+        }
+
+        let content = iframeDoc.body.innerHTML;
+        iframeDoc.body.innerHTML = marked.parse(content);
+    }
+    window.AppLoadCode = function (iframeId, extension, cssUrl) {
+        let iframeDoc = document.getElementById(iframeId).contentWindow.document;
+
+        let link = iframeDoc.createElement("link");
+        link.href = cssUrl;
+        link.rel = "stylesheet";
+        link.type = "text/css";
+        iframeDoc.head.appendChild(link);
+
+        let content = iframeDoc.body.firstChild.innerHTML;
+        content = content.replace("&", "&amp;").replace("<", "&lt;");
+        content = '<pre class="line-numbers"><code class="language-' + extension + '">' + content + '</code></pre>';
+        iframeDoc.body.innerHTML = content;
+        Prism.highlightAllUnder(iframeDoc.body);
+    }
+</script>
+
+@code {
+    public sealed class PreviewItem
+    {
+        public string  DisplayName  { get; init; } = string.Empty;
+        public string  ContentType  { get; init; } = string.Empty;
+        public string  PreviewUrl   { get; init; } = string.Empty;
+    }
+
+    [Parameter] public EventCallback OnClosed { get; set; }
+
+    private PreviewItem?       _item;
+    private List<PreviewItem>  _items       = [];
+    private int                _currentIndex;
+    private DotNetObjectReference<FilePreviewModal>? _dotnetRef;
+
+    private PreviewItem? PrevItem => _currentIndex > 0                  ? _items[_currentIndex - 1] : null;
+    private PreviewItem? NextItem => _currentIndex < _items.Count - 1   ? _items[_currentIndex + 1] : null;
+
+    // ── Public API ────────────────────────────────────────────────────────────
+    public async Task OpenAsync(PreviewItem item, IReadOnlyList<PreviewItem>? allItems = null)
+    {
+        _items = allItems is not null ? [.. allItems] : [item];
+        _currentIndex = _items.IndexOf(item);
+        if (_currentIndex < 0) { _items.Insert(0, item); _currentIndex = 0; }
+        _item = _items[_currentIndex];
+        StateHasChanged();
+        await RegisterKeyboardAsync();
+    }
+
+    public async Task CloseAsync()
+    {
+        await UnregisterKeyboardAsync();
+        _item = null;
+        StateHasChanged();
+        await OnClosed.InvokeAsync();
+    }
+
+    // ── Navigation ────────────────────────────────────────────────────────────
+    private void NavigatePrev()
+    {
+        if (PrevItem is null) return;
+        _currentIndex--;
+        _item = _items[_currentIndex];
+    }
+
+    private void NavigateNext()
+    {
+        if (NextItem is null) return;
+        _currentIndex++;
+        _item = _items[_currentIndex];
+    }
+
+    private void Close() => _ = CloseAsync();
+
+    // ── Keyboard ──────────────────────────────────────────────────────────────
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            _dotnetRef = DotNetObjectReference.Create(this);
+        }
+    }
+
+    private async Task RegisterKeyboardAsync()
+    {
+        if (_dotnetRef is null) _dotnetRef = DotNetObjectReference.Create(this);
+        await JS.InvokeVoidAsync("tfioPreviewRegisterKeys", _dotnetRef);
+    }
+
+    private async Task UnregisterKeyboardAsync()
+    {
+        try { await JS.InvokeVoidAsync("tfioPreviewUnregisterKeys"); } catch { }
+    }
+
+    [JSInvokable]
+    public void OnKeyDown(string key)
+    {
+        if (key == "ArrowLeft")       NavigatePrev();
+        else if (key == "ArrowRight") NavigateNext();
+        else if (key == "Escape")     Close();
+        StateHasChanged();
+    }
+
+    // ── iframe onload helpers ─────────────────────────────────────────────────
+    private async Task OnMdLoad()
+    {
+        await JS.InvokeVoidAsync("AppLoadMarkdorw", "preview-iframe-md", "");
+    }
+
+    private async Task OnCodeLoad()
+    {
+        var ext    = Path.GetExtension(_item?.DisplayName ?? "").TrimStart('.').ToLowerInvariant();
+        var cssUrl = NavigationManager.ToAbsoluteUri("_tfioassets/prism.min.css").ToString();
+        await JS.InvokeVoidAsync("AppLoadCode", "preview-iframe-code", ext, cssUrl);
+    }
+
+    // ── Type helpers ──────────────────────────────────────────────────────────
+    private static readonly HashSet<string> _markdownExts = ["md", "markdown"];
+    private static readonly HashSet<string> _codeExts = [
+        "cs","js","ts","jsx","tsx","html","htm","css","scss","less",
+        "json","xml","yaml","yml","toml","sh","bat","ps1","py","rb",
+        "java","go","rs","c","cpp","h","hpp","sql","php","swift","kt"
+    ];
+
+    private static bool _IsMarkdown(string ext) => _markdownExts.Contains(ext);
+    private static bool _IsCode(string ext)     => _codeExts.Contains(ext);
+
+    public async ValueTask DisposeAsync()
+    {
+        await UnregisterKeyboardAsync();
+        _dotnetRef?.Dispose();
+    }
+}

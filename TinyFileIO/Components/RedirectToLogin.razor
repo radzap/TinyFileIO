@@ -1,0 +1,9 @@
+@inject NavigationManager Nav
+
+@code {
+    protected override void OnInitialized()
+    {
+        var current = Uri.EscapeDataString(Nav.Uri);
+        Nav.NavigateTo($"/_tfio/login?ReturnUrl={current}", replace: true);
+    }
+}

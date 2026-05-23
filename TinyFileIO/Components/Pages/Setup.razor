@@ -1,0 +1,61 @@
+@page "/_tfio/setup"
+@layout TfioLayout
+@using Microsoft.EntityFrameworkCore
+@inject IDbContextFactory<TinyFileIO.Data.AppDbContext> DbFactory
+@inject IConfiguration Config
+@inject NavigationManager Nav
+
+@code {
+    [SupplyParameterFromQuery] public string? Error { get; set; }
+
+    protected override async Task OnInitializedAsync()
+    {
+        // Setup only available when static account is disabled and no DB users exist
+        var staticAllowed = Config.GetValue<bool>("UseStaticAccount");
+        if (staticAllowed)
+        {
+            Nav.NavigateTo("/_tfio/login", replace: true);
+            return;
+        }
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        if (await db.Users.AnyAsync())
+            Nav.NavigateTo("/_tfio/login", replace: true);
+    }
+}
+
+<PageTitle>Initial setup — TinyFileIO</PageTitle>
+
+<div class="tfio-card">
+    <a href="/_tfio/login" class="tfio-logo">
+        <span class="tfio-logo-icon">TF</span>
+        TinyFileIO
+    </a>
+    <h2>Create admin account</h2>
+    <p class="tfio-subtitle">No users exist yet. Create the first super-admin account to get started.</p>
+
+    @if (Error == "empty")
+    {
+        <p class="tfio-error">Username and password are required.</p>
+    }
+    else if (Error == "mismatch")
+    {
+        <p class="tfio-error">Passwords do not match.</p>
+    }
+
+    <form method="post" action="/_tfio/auth/setup">
+        <div class="tfio-field">
+            <label for="Username">Username</label>
+            <input id="Username" name="Username" type="text" autocomplete="username" required autofocus />
+        </div>
+        <div class="tfio-field">
+            <label for="Password">Password</label>
+            <input id="Password" name="Password" type="password" autocomplete="new-password" required />
+        </div>
+        <div class="tfio-field">
+            <label for="Confirm">Confirm password</label>
+            <input id="Confirm" name="Confirm" type="password" autocomplete="new-password" required />
+        </div>
+        <button type="submit" class="tfio-btn">Create account</button>
+    </form>
+</div>

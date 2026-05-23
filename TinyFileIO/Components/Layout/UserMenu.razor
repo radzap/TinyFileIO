@@ -1,0 +1,56 @@
+@using System.Security.Claims
+@inject NavigationManager Nav
+
+<div class="user-menu">
+    <button class="user-menu-trigger" @onclick="Toggle" type="button">
+        <span class="user-avatar">@_initials</span>
+        <span>@_username</span>
+        <span class="user-menu-chevron @(_open ? "open" : "")">▼</span>
+    </button>
+
+    @if (_open)
+    {
+        <div class="user-dropdown">
+            <div class="user-dropdown-header">
+                <div class="uname">@_username</div>
+                @if (_isSuperAdmin)
+                {
+                    <div class="urole">Super Admin</div>
+                }
+            </div>
+            <a href="/_tfio/profile">
+                <span class="menu-icon">👤</span> Profile
+            </a>
+            <a href="/_tfio/auth/logout">
+                <span class="menu-icon">⏏</span> Sign out
+            </a>
+        </div>
+
+        <!-- click-away -->
+        <div style="position:fixed;inset:0;z-index:299;" @onclick="Close"></div>
+    }
+</div>
+
+@code {
+    [CascadingParameter] private Task<AuthenticationState>? AuthState { get; set; }
+
+    private bool _open;
+    private string _username = string.Empty;
+    private string _initials = "?";
+    private bool _isSuperAdmin;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (AuthState is null) return;
+        var state = await AuthState;
+        _username    = state.User.FindFirstValue(ClaimTypes.Name) ?? "User";
+        _isSuperAdmin = state.User.FindFirstValue("is_super_admin") == "true";
+        _initials    = string.Concat(_username.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                           .Take(2).Select(w => char.ToUpperInvariant(w[0])));
+        if (string.IsNullOrEmpty(_initials) && _username.Length > 0)
+            _initials = _username[0].ToString().ToUpperInvariant();
+    }
+
+    private void Toggle() => _open = !_open;
+    private void Close()  => _open = false;
+}

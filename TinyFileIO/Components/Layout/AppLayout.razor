@@ -1,0 +1,235 @@
+@inherits LayoutComponentBase
+@implements IDisposable
+@inject NavigationManager Nav
+@inject IS3BucketService BucketService
+@inject IAuthorizationProvider Authz
+@using System.Security.Claims
+@using Microsoft.AspNetCore.Components.Authorization
+@using TinyFileIO.Models.Api.Buckets
+
+<div class="app-shell">
+
+    <!-- ── Header ──────────────────────────────────────────────── -->
+    <header class="app-header">
+        <button class="sidebar-toggle" @onclick="ToggleSidebar" title="Toggle menu" type="button">&#9776;</button>
+
+        <a href="/_tfio/buckets" class="app-logo">
+            <span class="app-logo-icon">TF</span>
+            TinyFileIO
+        </a>
+
+        <span class="header-spacer"></span>
+
+        <UserMenu />
+    </header>
+
+    <!-- ── Body ────────────────────────────────────────────────── -->
+    <div class="app-body">
+
+        <!-- Overlay (mobile) -->
+        <div class="sidebar-overlay @(_sidebarOpen ? "open" : "")" @onclick="CloseSidebar"></div>
+
+        <!-- ── Sidebar ──────────────────────────────────────────── -->
+        <aside class="app-sidebar @(_sidebarOpen ? "open" : "")">
+
+            <span class="sidebar-section-title">Storage</span>
+            <nav class="sidebar-nav">
+                @if (_isSuperAdmin)
+                {
+                    <button class="sidebar-link sidebar-action" type="button" @onclick="OpenAddBucket">
+                        <span class="nav-icon">＋</span> Add bucket
+                    </button>
+                }
+                <a href="/_tfio/buckets" class="sidebar-link @ActiveClass("/_tfio/buckets")">
+                    <span class="nav-icon">🗄</span> Buckets
+                </a>
+                @foreach (var bucket in _buckets)
+                {
+                    <a href="@bucket.NavHref" class="sidebar-link sidebar-sub-link @ActiveClass(bucket.NavHref)">
+                        <span class="nav-icon">🗄</span> @bucket.Name
+                    </a>
+                }
+            </nav>
+
+            <span class="sidebar-section-title">Admin</span>
+            <nav class="sidebar-nav">
+                @if (_isSuperAdmin)
+                {
+                    <a href="/_tfio/users" class="sidebar-link @ActiveClass("/_tfio/users")">
+                        <span class="nav-icon">👥</span> Users
+                    </a>
+                    <a href="/_tfio/jobs" class="sidebar-link @ActiveClass("/_tfio/jobs")">
+                        <span class="nav-icon">⚙</span> Jobs
+                    </a>
+                }
+                <a href="/_tfio/credentials" class="sidebar-link @ActiveClass("/_tfio/credentials")">
+                    <span class="nav-icon">🔑</span> API Keys
+                </a>
+                <a href="/_tfio/profile" class="sidebar-link @ActiveClass("/_tfio/profile")">
+                    <span class="nav-icon">👤</span> Profile
+                </a>
+            </nav>
+
+        </aside>
+
+        <!-- ── Main content ─────────────────────────────────────── -->
+        <main class="app-main" @onclick="OnMainClick">
+            @Body
+        </main>
+
+    </div>
+
+</div>
+
+<div id="blazor-error-ui" data-nosnippet>
+    An unhandled error has occurred.
+    <a href="." class="reload">Reload</a>
+    <span class="dismiss">🗙</span>
+</div>
+
+@if (_showAddBucket)
+{
+    <div class="modal-backdrop" @onclick="CloseAddBucket">
+        <div class="modal" @onclick:stopPropagation>
+            <h3>Add bucket</h3>
+            @if (_bucketError is not null)
+            {
+                <div class="tfio-error mb-1">@_bucketError</div>
+            }
+            <div class="tfio-field">
+                <label>Bucket name</label>
+                <input @bind="_bucketName" @bind:event="oninput" type="text" placeholder="my-bucket"
+                       @onkeydown="OnBucketKeyDown" autofocus />
+            </div>
+            <div class="modal-actions">
+                <button class="tfio-btn tfio-btn-sm" type="button" @onclick="CreateBucketAsync"
+                        disabled="@(string.IsNullOrWhiteSpace(_bucketName))">Create</button>
+                <button class="tfio-btn tfio-btn-sm tfio-btn-secondary" type="button" @onclick="CloseAddBucket">Cancel</button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [CascadingParameter] private Task<AuthenticationState>? AuthState { get; set; }
+
+    private bool   _sidebarOpen;
+    private string _currentPath  = string.Empty;
+    private bool   _isSuperAdmin;
+    private string _userId       = string.Empty;
+    private string _username     = string.Empty;
+    private List<BucketMenuItem> _buckets = [];
+
+    // Add-bucket modal state
+    private bool    _showAddBucket;
+    private string  _bucketName  = string.Empty;
+    private string? _bucketError;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _currentPath = new Uri(Nav.Uri).AbsolutePath;
+        Nav.LocationChanged += OnLocationChanged;
+
+        if (AuthState is not null)
+        {
+            var state = await AuthState;
+            _userId = state.User.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+            _username = state.User.FindFirstValue(ClaimTypes.Name) ?? _userId;
+            _isSuperAdmin = state.User.FindFirstValue("is_super_admin") == "true";
+        }
+
+        await LoadBucketsAsync();
+    }
+
+    private void OnLocationChanged(object? sender, Microsoft.AspNetCore.Components.Routing.LocationChangedEventArgs e)
+    {
+        _currentPath = new Uri(e.Location).AbsolutePath;
+        _sidebarOpen = false; // close sidebar on navigation (mobile)
+        InvokeAsync(StateHasChanged);
+    }
+
+    private string ActiveClass(string path) =>
+        string.Equals(_currentPath, path, StringComparison.OrdinalIgnoreCase) ? "active" : string.Empty;
+
+    private async Task LoadBucketsAsync()
+    {
+        var identity = new CallerIdentity { UserId = _userId, Username = _username, IsSuperAdmin = _isSuperAdmin };
+        var response = await BucketService.ListBucketsAsync(identity.UserId);
+        var buckets = new List<BucketMenuItem>();
+
+        foreach (var bucket in response.Buckets)
+        {
+            if (identity.IsSuperAdmin)
+            {
+                buckets.Add(BucketMenuItem.From(bucket));
+                continue;
+            }
+
+            var access = await Authz.CheckAccessAsync(identity, bucket.Name, BucketPermission.Read);
+            if (access == AclCheckResult.Allowed)
+            {
+                buckets.Add(BucketMenuItem.From(bucket));
+            }
+        }
+
+        _buckets = buckets.OrderBy(b => b.Name, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private void ToggleSidebar() => _sidebarOpen = !_sidebarOpen;
+    private void CloseSidebar()  => _sidebarOpen = false;
+
+    private void OnMainClick()
+    {
+        if (_sidebarOpen) _sidebarOpen = false;
+    }
+
+    private void OpenAddBucket()
+    {
+        _bucketName  = string.Empty;
+        _bucketError = null;
+        _showAddBucket = true;
+    }
+
+    private void CloseAddBucket() => _showAddBucket = false;
+
+    private async Task OnBucketKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" && !string.IsNullOrWhiteSpace(_bucketName))
+            await CreateBucketAsync();
+        else if (e.Key == "Escape")
+            CloseAddBucket();
+    }
+
+    private async Task CreateBucketAsync()
+    {
+        _bucketError = null;
+        var name = _bucketName.Trim();
+        if (string.IsNullOrEmpty(name)) return;
+
+        try
+        {
+            await BucketService.CreateBucketAsync(name, region: null, ownerId: "admin");
+            _showAddBucket = false;
+            await LoadBucketsAsync();
+            Nav.NavigateTo("/_tfio/buckets", forceLoad: false);
+        }
+        catch (Exception ex)
+        {
+            _bucketError = ex.Message;
+        }
+    }
+
+    public void Dispose() => Nav.LocationChanged -= OnLocationChanged;
+
+    private sealed class BucketMenuItem
+    {
+        public string Name { get; init; } = string.Empty;
+        public string NavHref { get; init; } = string.Empty;
+
+        public static BucketMenuItem From(BucketEntry bucket) => new()
+        {
+            Name = bucket.Name,
+            NavHref = $"/_tfio/buckets/{bucket.Name}"
+        };
+    }
+}

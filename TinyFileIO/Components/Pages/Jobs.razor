@@ -1,0 +1,135 @@
+@page "/_tfio/jobs"
+@layout AppLayout
+@attribute [Microsoft.AspNetCore.Authorization.Authorize]
+@using System.Security.Claims
+@using TinyFileIO.Models.Entities
+@using TinyFileIO.Services.BackgroundJobs
+@inject IBackgroundJobHistoryService JobHistory
+
+<PageTitle>Jobs — TinyFileIO</PageTitle>
+
+@if (!_isSuperAdmin)
+{
+    <div class="tfio-error">You do not have permission to view jobs.</div>
+    return;
+}
+
+<div class="page-header">
+    <h1>Jobs</h1>
+    <p>Background job run history and status.</p>
+</div>
+
+<div class="panel">
+    <div class="panel-title">
+        <span>Job history</span>
+        <button class="tfio-btn tfio-btn-sm tfio-btn-secondary" type="button" @onclick="LoadAsync">Refresh</button>
+    </div>
+    <div class="panel-body p-0">
+        @if (_loading)
+        {
+            <p class="empty-state">Loading…</p>
+        }
+        else if (_page.Items.Count == 0)
+        {
+            <p class="empty-state">No jobs found.</p>
+        }
+        else
+        {
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Created</th>
+                        <th>Type</th>
+                        <th>Status</th>
+                        <th>Bucket</th>
+                        <th>Progress</th>
+                        <th>Stats</th>
+                        <th>Error</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var job in _page.Items)
+                    {
+                        <tr>
+                            <td>@job.CreatedUtc.ToString("yyyy-MM-dd HH:mm:ss") UTC</td>
+                            <td>@job.JobType</td>
+                            <td><span class="tfio-badge">@job.Status</span></td>
+                            <td>@job.TargetBucket</td>
+                            <td>@job.ProcessedItems / @job.TotalItems</td>
+                            <td>
+                                <div>OK: @job.SucceededItems</div>
+                                <div>Skipped: @job.SkippedItems</div>
+                                <div>Failed: @job.FailedItems</div>
+                                <div>Bytes: @FormatSize(job.BytesProcessed)</div>
+                            </td>
+                            <td class="break-all">@job.Error</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    </div>
+</div>
+
+@if (_page.TotalPages > 1)
+{
+    <div class="modal-actions">
+        <button class="tfio-btn tfio-btn-sm tfio-btn-secondary" type="button" @onclick="PreviousPage" disabled="@(_page.Page <= 1)">Previous</button>
+        <span>Page @_page.Page of @_page.TotalPages</span>
+        <button class="tfio-btn tfio-btn-sm tfio-btn-secondary" type="button" @onclick="NextPage" disabled="@(_page.Page >= _page.TotalPages)">Next</button>
+    </div>
+}
+
+@code {
+    [CascadingParameter] private Task<AuthenticationState>? AuthState { get; set; }
+
+    private const int PageSize = 20;
+    private bool _isSuperAdmin;
+    private bool _loading = true;
+    private int _currentPage = 1;
+    private BackgroundJobHistoryPage _page = new() { Page = 1, PageSize = PageSize };
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (AuthState is not null)
+        {
+            var state = await AuthState;
+            _isSuperAdmin = state.User.FindFirstValue("is_super_admin") == "true";
+        }
+
+        if (_isSuperAdmin)
+            await LoadAsync();
+        else
+            _loading = false;
+    }
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _page = await JobHistory.GetPageAsync(_currentPage, PageSize);
+        _loading = false;
+    }
+
+    private async Task PreviousPage()
+    {
+        if (_currentPage <= 1) return;
+        _currentPage--;
+        await LoadAsync();
+    }
+
+    private async Task NextPage()
+    {
+        if (_currentPage >= _page.TotalPages) return;
+        _currentPage++;
+        await LoadAsync();
+    }
+
+    private static string FormatSize(long bytes)
+    {
+        if (bytes == 0) return "0 B";
+        string[] s = ["B", "KB", "MB", "GB", "TB"];
+        int i = 0; double v = bytes;
+        while (v >= 1024 && i < s.Length - 1) { v /= 1024; i++; }
+        return i == 0 ? $"{bytes} B" : $"{v:F1} {s[i]}";
+    }
+}

@@ -1,0 +1,182 @@
+@page "/_tfio/users"
+@layout AppLayout
+@attribute [Microsoft.AspNetCore.Authorization.Authorize]
+@using System.Security.Claims
+@inject IUserManagementService UserMgmt
+@inject NavigationManager Nav
+
+<PageTitle>Users — TinyFileIO</PageTitle>
+
+@if (!_isSuperAdmin)
+{
+    <div class="tfio-error">You do not have permission to manage users.</div>
+    return;
+}
+
+<div class="page-header">
+    <h1>Users</h1>
+    <p>Manage local database accounts.</p>
+</div>
+
+@if (_message is not null)
+{
+    <div class="@(_isError ? "tfio-error" : "tfio-success") mb-1">@_message</div>
+}
+
+<!-- ── Add user ──────────────────────────────────────────────────── -->
+<div class="panel mb-2">
+    <div class="panel-title">
+        <span>Add user</span>
+        <button class="tfio-btn tfio-btn-sm tfio-btn-secondary" type="button"
+                @onclick="() => _showAdd = !_showAdd">
+            @(_showAdd ? "Cancel" : "+ Add user")
+        </button>
+    </div>
+    @if (_showAdd)
+    {
+        <div class="panel-body">
+            <div class="form-row">
+                <div class="tfio-field">
+                    <label>Username</label>
+                    <input @bind="_addUsername" type="text" placeholder="username" />
+                </div>
+                <div class="tfio-field">
+                    <label>Password</label>
+                    <input @bind="_addPassword" type="password" placeholder="password" />
+                </div>
+                <div class="tfio-field tfio-field-inline">
+                    <label>
+                        <input @bind="_addIsAdmin" type="checkbox" />
+                        Super admin
+                    </label>
+                </div>
+            </div>
+            <button class="tfio-btn tfio-btn-sm" type="button" @onclick="AddUserAsync">Create</button>
+        </div>
+    }
+</div>
+
+<!-- ── User list ─────────────────────────────────────────────────── -->
+<div class="panel">
+    <div class="panel-title"><span>All users</span></div>
+    <div class="panel-body p-0">
+        @if (_users.Count == 0)
+        {
+            <p class="empty-state">No database users found.</p>
+        }
+        else
+        {
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Username</th>
+                        <th>Role</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var u in _users)
+                    {
+                        <tr>
+                            <td>@u.Username</td>
+                            <td>
+                                @if (u.IsSuperAdmin)
+                                {
+                                    <span class="tfio-badge">Super Admin</span>
+                                }
+                                else
+                                {
+                                    <span class="text-muted">User</span>
+                                }
+                            </td>
+                            <td class="action-cell">
+                                <a href="/_tfio/users/@u.Id" class="tfio-btn tfio-btn-sm tfio-btn-secondary">Edit</a>
+                                @if (u.Id.ToString() != _currentUserId)
+                                {
+                                    <button class="tfio-btn tfio-btn-sm btn-danger"
+                                            @onclick="() => RequestDelete(u.Id, u.Username)">
+                                        Delete
+                                    </button>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    </div>
+</div>
+
+<!-- ── Delete confirmation ────────────────────────────────────────── -->
+@if (_deleteId.HasValue)
+{
+    <div class="modal-backdrop" @onclick="CancelDelete">
+        <div class="modal" @onclick:stopPropagation="true">
+            <h3>Delete user</h3>
+            <p>Are you sure you want to delete <strong>@_deleteUsername</strong>? This cannot be undone.</p>
+            <div class="modal-actions">
+                <button class="tfio-btn btn-danger tfio-btn-sm" @onclick="ConfirmDeleteAsync">Yes, delete</button>
+                <button class="tfio-btn tfio-btn-secondary tfio-btn-sm" @onclick="CancelDelete">Cancel</button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [CascadingParameter] private Task<AuthenticationState>? AuthState { get; set; }
+
+    private IReadOnlyList<UserDto> _users = [];
+    private string? _currentUserId;
+    private bool _isSuperAdmin;
+    private string? _message;
+    private bool _isError;
+
+    private bool _showAdd;
+    private string _addUsername = string.Empty;
+    private string _addPassword = string.Empty;
+    private bool _addIsAdmin;
+
+    private Guid? _deleteId;
+    private string _deleteUsername = string.Empty;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (AuthState is not null)
+        {
+            var s = await AuthState;
+            _currentUserId = s.User.FindFirstValue(ClaimTypes.NameIdentifier);
+            _isSuperAdmin  = s.User.FindFirstValue("is_super_admin") == "true";
+        }
+        if (_isSuperAdmin) await LoadAsync();
+    }
+
+    private async Task LoadAsync() => _users = await UserMgmt.GetAllAsync();
+
+    private async Task AddUserAsync()
+    {
+        var (ok, error) = await UserMgmt.CreateAsync(_addUsername, _addPassword, _addIsAdmin);
+        if (ok)
+        {
+            _addUsername = _addPassword = string.Empty;
+            _addIsAdmin  = false;
+            _showAdd     = false;
+            SetMessage("User created.", false);
+            await LoadAsync();
+        }
+        else SetMessage(error!, true);
+    }
+
+    private void RequestDelete(Guid id, string username) { _deleteId = id; _deleteUsername = username; }
+    private void CancelDelete() { _deleteId = null; _deleteUsername = string.Empty; }
+
+    private async Task ConfirmDeleteAsync()
+    {
+        if (!_deleteId.HasValue) return;
+        var (ok, error) = await UserMgmt.DeleteAsync(_deleteId.Value);
+        CancelDelete();
+        if (ok) { SetMessage("User deleted.", false); await LoadAsync(); }
+        else SetMessage(error!, true);
+    }
+
+    private void SetMessage(string msg, bool isError) { _message = msg; _isError = isError; }
+}

@@ -1,0 +1,114 @@
+@page "/_tfio/profile"
+@layout AppLayout
+@attribute [Microsoft.AspNetCore.Authorization.Authorize]
+@using System.Security.Claims
+@inject IUserManagementService UserMgmt
+
+<PageTitle>Profile — TinyFileIO</PageTitle>
+
+<div class="page-header">
+    <h1>Profile</h1>
+    <p>Manage your account settings.</p>
+</div>
+
+@if (_isStatic)
+{
+    <!-- ── Static account info ───────────────────────────────────── -->
+    <div class="panel mb-2">
+        <div class="panel-title"><span>Account</span></div>
+        <div class="panel-body">
+            <div class="info-row">
+                <span class="info-label">Username</span>
+                <span>@_username</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Role</span>
+                <span class="tfio-badge">Super Admin</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="tfio-info-box">
+        <span class="info-icon">ℹ</span>
+        <div>
+            This is a static account configured in <code>appsettings.json</code>.<br />
+            To change the username, password, or disable this account, update
+            <code>StaticUser</code>, <code>StaticPassword</code>, or set
+            <code>UseStaticAccount</code> to <code>false</code> in your settings file.
+        </div>
+    </div>
+}
+else if (_userId.HasValue)
+{
+    @if (_message is not null)
+    {
+        <div class="@(_isError ? "tfio-error" : "tfio-success") mb-1">@_message</div>
+    }
+
+    <!-- ── Account info ──────────────────────────────────────────── -->
+    <div class="panel mb-2">
+        <div class="panel-title"><span>Account</span></div>
+        <div class="panel-body">
+            <div class="info-row">
+                <span class="info-label">Username</span>
+                <span>@_username</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Change password ───────────────────────────────────────── -->
+    <div class="panel">
+        <div class="panel-title"><span>Change password</span></div>
+        <div class="panel-body">
+            <div class="form-row">
+                <div class="tfio-field">
+                    <label>New password</label>
+                    <input @bind="_newPassword" type="password" />
+                </div>
+                <div class="tfio-field">
+                    <label>Confirm password</label>
+                    <input @bind="_confirmPassword" type="password" />
+                </div>
+            </div>
+            <button class="tfio-btn tfio-btn-sm" @onclick="SavePasswordAsync">Update password</button>
+        </div>
+    </div>
+}
+
+@code {
+    [CascadingParameter] private Task<AuthenticationState>? AuthState { get; set; }
+
+    private bool _isStatic;
+    private Guid? _userId;
+    private string _username = string.Empty;
+
+    private string _newPassword     = string.Empty;
+    private string _confirmPassword = string.Empty;
+
+    private string? _message;
+    private bool    _isError;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (AuthState is null) return;
+        var state = await AuthState;
+        var idClaim = state.User.FindFirstValue(ClaimTypes.NameIdentifier);
+        _username = state.User.FindFirstValue(ClaimTypes.Name) ?? string.Empty;
+
+        _isStatic = idClaim == "static-admin";
+
+        if (!_isStatic && Guid.TryParse(idClaim, out var guid))
+            _userId = guid;
+    }
+
+    private async Task SavePasswordAsync()
+    {
+        if (!_userId.HasValue) return;
+        if (_newPassword != _confirmPassword) { SetMessage("Passwords do not match.", true); return; }
+        var (ok, error) = await UserMgmt.UpdatePasswordAsync(_userId.Value, _newPassword);
+        if (ok) { _newPassword = _confirmPassword = string.Empty; SetMessage("Password updated.", false); }
+        else SetMessage(error!, true);
+    }
+
+    private void SetMessage(string msg, bool isError) { _message = msg; _isError = isError; }
+}
