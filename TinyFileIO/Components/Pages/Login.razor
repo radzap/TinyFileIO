@@ -16,7 +16,7 @@
 
     protected override async Task OnInitializedAsync()
     {
-        _staticAllowed = Config.GetValue<bool>("UseStaticAccount");
+        _staticAllowed = Config.GetValue<bool>("UseStaticAccount") && !string.IsNullOrEmpty(Config.GetValue<string?>("StaticUser"));
 
         await using var db = await DbFactory.CreateDbContextAsync();
         _hasDbUsers = await db.Users.AnyAsync();

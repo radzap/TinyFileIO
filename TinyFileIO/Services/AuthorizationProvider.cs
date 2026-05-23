@@ -36,6 +36,7 @@ public sealed class AuthorizationProvider : IAuthorizationProvider
     {
         if (_useStatic
             && !string.IsNullOrEmpty(_staticUser)
+            && !string.IsNullOrEmpty(_staticPassword)
             && string.Equals(username, _staticUser, StringComparison.Ordinal)
             && string.Equals(password, _staticPassword, StringComparison.Ordinal))
         {
@@ -72,6 +73,7 @@ public sealed class AuthorizationProvider : IAuthorizationProvider
         // Static account: username acts as AccessKeyId, password as S3 secret
         if (_useStatic
             && !string.IsNullOrEmpty(_staticUser)
+            && !string.IsNullOrEmpty(_staticPassword)
             && string.Equals(accessKeyId, _staticUser, StringComparison.Ordinal))
         {
             var identity = new CallerIdentity

@@ -11,7 +11,7 @@
     protected override async Task OnInitializedAsync()
     {
         // Setup only available when static account is disabled and no DB users exist
-        var staticAllowed = Config.GetValue<bool>("UseStaticAccount");
+        var staticAllowed = Config.GetValue<bool>("UseStaticAccount") && !string.IsNullOrEmpty(Config.GetValue<string?>("StaticUser"));
         if (staticAllowed)
         {
             Nav.NavigateTo("/_tfio/login", replace: true);
