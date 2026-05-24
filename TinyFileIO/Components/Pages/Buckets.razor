@@ -141,6 +141,12 @@
                                             @onclick="() => RequestDeleteSingle(item)">🗑</button>
                                 }
                             }
+                            else if (!item.IsBucket && _canDelete)
+                            {
+                                <button class="tfio-btn tfio-btn-sm btn-danger"
+                                        title="Delete" type="button"
+                                        @onclick="() => RequestDeleteSingle(item)">🗑</button>
+                            }
                         </span>
                     </div>
                 }
@@ -197,6 +203,11 @@
                 else if (!_detail.IsBucket)
                 {
                     <a class="tfio-btn tfio-btn-sm" href="@_detail.NavHref">📂 Open folder</a>
+                    @if (_canDelete)
+                    {
+                        <button class="tfio-btn tfio-btn-sm btn-danger" type="button"
+                                @onclick="() => RequestDeleteSingle(_detail)">🗑 Delete</button>
+                    }
                 }
                 else
                 {
@@ -1109,7 +1120,13 @@
             if (_deleteBatch)
             {
                 foreach (var key in _selectedKeys.ToList())
-                    await DeleteObjectAndPruneAsync(key);
+                {
+                    var batchItem = _items.FirstOrDefault(i => i.Key == key);
+                    if (batchItem is { IsObject: false, IsBucket: false })
+                        await DeletePrefixAsync(key);
+                    else
+                        await DeleteObjectAndPruneAsync(key);
+                }
                 _selectedKeys.Clear();
             }
             else if (_deleteTarget is not null)
