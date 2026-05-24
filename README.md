@@ -26,13 +26,13 @@ Image is available on Docker Hub as [`radzap/tinyfileio`](https://hub.docker.com
 #### Basic run (dynamic accounts, data volume)
 
 ```bash
-docker run -d -p 9000:8080 -v tinyfileio-data:/datastore radzap/tinyfileio
+docker run -d --name TinyFileIO --restart unless-stopped -p 9000:8080 -v tinyfileio-data:/datastore radzap/tinyfileio
 ```
 
 #### With static credentials `iouser` / `iopassword`
 
 ```bash
-docker run -d -p 9000:8080 -v tinyfileio-data:/datastore -e UseStaticAccount=true -e StaticUser=iouser -e StaticPassword=iopassword radzap/tinyfileio
+docker run -d --name TinyFileIO --restart unless-stopped -p 9000:8080 -v tinyfileio-data:/datastore -e UseStaticAccount=true -e StaticUser=iouser -e StaticPassword=iopassword radzap/tinyfileio
 ```
 
 ### Data & database
