@@ -25,11 +25,14 @@ public sealed class ObjectController : S3ControllerBase
 {
     private readonly IS3ObjectService _objects;
     private readonly IS3MultipartService _multipart;
+    private readonly ILogger<ObjectController> _logger;
 
-    public ObjectController(IS3ObjectService objects, IS3MultipartService multipart, IS3XmlSerializer xml) : base(xml)
+    public ObjectController(IS3ObjectService objects, IS3MultipartService multipart,
+        IS3XmlSerializer xml, ILogger<ObjectController> logger) : base(xml)
     {
         _objects = objects;
         _multipart = multipart;
+        _logger = logger;
     }
 
     // ── PutObject / CopyObject ────────────────────────────────────────────────
@@ -105,7 +108,7 @@ public sealed class ObjectController : S3ControllerBase
             Key = key,
             PartNumber = partNumber.Value,
             UploadId = uploadId,
-            ContentLength = Request.ContentLength,
+            ContentLength = S3ChunkedDecodingStream.GetDecodedContentLength(Request.Headers) ?? Request.ContentLength,
             ContentMd5 = Request.Headers["Content-MD5"],
             ContentSha256 = Request.Headers["x-amz-content-sha256"]
         };
@@ -113,7 +116,11 @@ public sealed class ObjectController : S3ControllerBase
         UploadPartResponse result;
         try
         {
-            result = await _multipart.UploadPartAsync(request, Request.Body, ct);
+            var body = S3ChunkedDecodingStream.IsAwsChunked(Request.Headers)
+                ? new S3ChunkedDecodingStream(Request.Body)
+                : Request.Body;
+
+            result = await _multipart.UploadPartAsync(request, body, ct);
         }
         catch (KeyNotFoundException)
         {
@@ -336,7 +343,12 @@ public sealed class ObjectController : S3ControllerBase
             return await ListMultipartUploads(bucket, ct);
 
         if (deleteParam is null)
+        {
+            _logger.LogWarning(
+                "Unsupported POST {Method} {Path}{QueryString} Host={Host} ContentType={ContentType}",
+                Request.Method, Request.Path, Request.QueryString, Request.Host, Request.ContentType);
             return S3Error("InvalidRequest", "Unsupported POST operation.", StatusCodes.Status400BadRequest);
+        }
 
         var body = Xml.Deserialize<DeleteObjectsRequest>(Request.Body);
         if (body is null)
@@ -385,6 +397,9 @@ public sealed class ObjectController : S3ControllerBase
         if (uploadId is not null)
             return await CompleteMultipartUpload(bucket, key, uploadId, ct);
 
+        _logger.LogWarning(
+            "Unsupported POST {Method} {Path}{QueryString} Host={Host} ContentType={ContentType}",
+            Request.Method, Request.Path, Request.QueryString, Request.Host, Request.ContentType);
         return S3Error("InvalidRequest", "Unsupported POST operation.", StatusCodes.Status400BadRequest);
     }
 

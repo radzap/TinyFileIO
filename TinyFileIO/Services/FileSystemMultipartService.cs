@@ -82,6 +82,18 @@ public sealed class FileSystemMultipartService : IS3MultipartService
         File.WriteAllText(MetaFile(request.Bucket, uploadId),
             JsonSerializer.Serialize(meta));
 
+        // Reserve the final object path with an empty placeholder so concurrent
+        // operations see the key as taken while the multipart upload is in flight.
+        // CompleteMultipartUpload atomically replaces it; AbortMultipartUpload
+        // removes it iff it is still empty.
+        var destPath = ObjectPath(request.Bucket, request.Key);
+        Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
+        if (!File.Exists(destPath))
+        {
+            using var _ = new FileStream(destPath, FileMode.CreateNew, FileAccess.Write,
+                FileShare.None);
+        }
+
         return Task.FromResult(new CreateMultipartUploadResponse
         {
             Bucket   = request.Bucket,
@@ -216,6 +228,16 @@ public sealed class FileSystemMultipartService : IS3MultipartService
     {
         EnsureBucketExists(request.Bucket);
         _ = ReadMeta(request.Bucket, request.UploadId); // validate exists
+
+        // Remove the reserved placeholder if it is still a 0-byte stub.
+        var destPath = ObjectPath(request.Bucket, request.Key);
+        try
+        {
+            if (File.Exists(destPath) && new FileInfo(destPath).Length == 0)
+                File.Delete(destPath);
+        }
+        catch { /* best-effort */ }
+
         TryDeleteUpload(request.Bucket, request.UploadId);
         return Task.CompletedTask;
     }
