@@ -42,6 +42,9 @@ public sealed class FileSystemMultipartService : IS3MultipartService
     private string PartFile(string bucket, string uploadId, int partNumber)
         => Path.Combine(UploadDir(bucket, uploadId), partNumber.ToString("D5"));
 
+    private string CompletedMarkerFile(string bucket, string uploadId)
+        => Path.Combine(StagingRoot(bucket), uploadId + ".completed.json");
+
     private string ObjectPath(string bucket, string key)
         => Path.Combine(_root, bucket, key.Replace('/', Path.DirectorySeparatorChar));
 
@@ -179,38 +182,59 @@ public sealed class FileSystemMultipartService : IS3MultipartService
 
         var destPath = ObjectPath(request.Bucket, request.Key);
         Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
+        var parts = request.Parts.Count == 0
+            ? EnumerateUploadedParts(request.Bucket, request.UploadId)
+            : request.Parts.OrderBy(p => p.PartNumber).ToList();
+
+        if (parts.Count == 0)
+            throw new InvalidOperationException("InvalidPart");
 
         var tmpPath = destPath + ".mpu~";
         try
         {
-            await using (var dest = new FileStream(tmpPath, FileMode.Create, FileAccess.Write,
-                FileShare.None, StreamCopyBufferSize, useAsync: true))
+            if (parts.Count == 1)
             {
-                foreach (var part in request.Parts.OrderBy(p => p.PartNumber))
-                {
-                    var partPath = PartFile(request.Bucket, request.UploadId, part.PartNumber);
-                    if (!File.Exists(partPath))
-                        throw new InvalidOperationException($"InvalidPart:{part.PartNumber}");
+                // Single-part fast path: move the staged part directly into place.
+                var partPath = PartFile(request.Bucket, request.UploadId, parts[0].PartNumber);
+                if (!File.Exists(partPath))
+                    throw new InvalidOperationException($"InvalidPart:{parts[0].PartNumber}");
 
-                    await using var src = new FileStream(partPath, FileMode.Open, FileAccess.Read,
-                        FileShare.Read, StreamCopyBufferSize, useAsync: true);
-                    await src.CopyToAsync(dest, StreamCopyBufferSize, ct);
-                }
+                // Remove the 0-byte placeholder so File.Move can replace it.
+                if (File.Exists(destPath)) File.Delete(destPath);
+                File.Move(partPath, destPath);
             }
+            else
+            {
+                await using (var dest = new FileStream(tmpPath, FileMode.Create, FileAccess.Write,
+                    FileShare.None, StreamCopyBufferSize, useAsync: true))
+                {
+                    foreach (var part in parts)
+                    {
+                        var partPath = PartFile(request.Bucket, request.UploadId, part.PartNumber);
+                        if (!File.Exists(partPath))
+                            throw new InvalidOperationException($"InvalidPart:{part.PartNumber}");
 
-            File.Move(tmpPath, destPath, overwrite: true);
+                        await using var src = new FileStream(partPath, FileMode.Open, FileAccess.Read,
+                            FileShare.Read, StreamCopyBufferSize, useAsync: true);
+                        await src.CopyToAsync(dest, StreamCopyBufferSize, ct);
+                    }
+                }
+
+                File.Move(tmpPath, destPath, overwrite: true);
+            }
         }
         catch
         {
             try { File.Delete(tmpPath); } catch { /* best-effort */ }
             throw;
         }
-        finally
-        {
-            TryDeleteUpload(request.Bucket, request.UploadId);
-        }
 
-        var etag = $"\"{ComputeETag(destPath).Trim('"')}-{request.Parts.Count}\"";
+        var etag = $"\"{ComputeETag(destPath).Trim('"')}-{parts.Count}\"";
+
+        // Write a completion marker BEFORE removing the staging directory so that
+        // ListParts can still describe the upload as a single consolidated part.
+        WriteCompletedMarker(request.Bucket, request.UploadId, meta, parts.Count, etag);
+        TryDeleteUpload(request.Bucket, request.UploadId);
 
         return new CompleteMultipartUploadResponse
         {
@@ -219,6 +243,24 @@ public sealed class FileSystemMultipartService : IS3MultipartService
             Location = $"/{request.Bucket}/{request.Key}",
             ETag     = etag
         };
+    }
+
+    private List<CompletePart> EnumerateUploadedParts(string bucket, string uploadId)
+    {
+        var uploadDir = UploadDir(bucket, uploadId);
+        if (!Directory.Exists(uploadDir))
+            throw new KeyNotFoundException("NoSuchUpload");
+
+        return new DirectoryInfo(uploadDir)
+            .EnumerateFiles()
+            .Where(f => f.Name != "meta.json" && int.TryParse(f.Name, out _))
+            .OrderBy(f => int.Parse(f.Name))
+            .Select(f => new CompletePart
+            {
+                PartNumber = int.Parse(f.Name),
+                ETag = ComputeETag(f.FullName)
+            })
+            .ToList();
     }
 
     // ── AbortMultipartUpload ──────────────────────────────────────────────────
@@ -297,6 +339,15 @@ public sealed class FileSystemMultipartService : IS3MultipartService
         ListPartsRequest request, CancellationToken ct = default)
     {
         EnsureBucketExists(request.Bucket);
+
+        // If the upload was already consolidated, surface a synthetic single
+        // whole part derived from the finalized object on disk.
+        var markerPath = CompletedMarkerFile(request.Bucket, request.UploadId);
+        if (!Directory.Exists(UploadDir(request.Bucket, request.UploadId)) && File.Exists(markerPath))
+        {
+            return Task.FromResult(BuildConsolidatedListPartsResponse(request, markerPath));
+        }
+
         var meta = ReadMeta(request.Bucket, request.UploadId);
 
         var uploadDir = UploadDir(request.Bucket, request.UploadId);
@@ -346,6 +397,60 @@ public sealed class FileSystemMultipartService : IS3MultipartService
         try { Directory.Delete(UploadDir(bucket, uploadId), recursive: true); } catch { /* best-effort */ }
     }
 
+    private void WriteCompletedMarker(string bucket, string uploadId, UploadMeta meta, int partCount, string etag)
+    {
+        try
+        {
+            Directory.CreateDirectory(StagingRoot(bucket));
+            var marker = new UploadCompletedMarker
+            {
+                Bucket    = meta.Bucket,
+                Key       = meta.Key,
+                UploadId  = uploadId,
+                Initiated = meta.Initiated,
+                Completed = DateTimeOffset.UtcNow,
+                PartCount = partCount,
+                ETag      = etag
+            };
+            File.WriteAllText(CompletedMarkerFile(bucket, uploadId), JsonSerializer.Serialize(marker));
+        }
+        catch { /* best-effort */ }
+    }
+
+    private ListPartsResponse BuildConsolidatedListPartsResponse(ListPartsRequest request, string markerPath)
+    {
+        var marker = JsonSerializer.Deserialize<UploadCompletedMarker>(File.ReadAllText(markerPath))
+                     ?? throw new InvalidOperationException("Corrupt upload completion marker.");
+
+        var objectPath = ObjectPath(request.Bucket, marker.Key);
+        var parts = new List<PartEntry>();
+        if (File.Exists(objectPath) &&
+            (!request.PartNumberMarker.HasValue || request.PartNumberMarker.Value < 1))
+        {
+            var info = new FileInfo(objectPath);
+            parts.Add(new PartEntry
+            {
+                PartNumber   = 1,
+                Size         = info.Length,
+                LastModified = info.LastWriteTimeUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                ETag         = marker.ETag
+            });
+        }
+
+        return new ListPartsResponse
+        {
+            Bucket               = request.Bucket,
+            Key                  = marker.Key,
+            UploadId             = request.UploadId,
+            MaxParts             = request.MaxParts,
+            PartNumberMarker     = request.PartNumberMarker ?? 0,
+            NextPartNumberMarker = null,
+            IsTruncated          = false,
+            StorageClass         = S3StorageClass.Standard,
+            Parts                = parts
+        };
+    }
+
     private static (long start, long length) ParseRange(string rangeHeader, long totalLength)
     {
         var value = rangeHeader.Replace("bytes=", string.Empty).Trim();
@@ -387,4 +492,20 @@ internal sealed class UploadMeta
     public string UploadId    { get; set; } = string.Empty;
     public string ContentType { get; set; } = "application/octet-stream";
     public DateTimeOffset Initiated { get; set; }
+}
+
+/// <summary>
+/// Marker persisted after a multipart upload has been consolidated into the
+/// final single object file, used by ListParts to keep returning a sensible
+/// (single whole part) response after staging has been cleaned up.
+/// </summary>
+internal sealed class UploadCompletedMarker
+{
+    public string Bucket    { get; set; } = string.Empty;
+    public string Key       { get; set; } = string.Empty;
+    public string UploadId  { get; set; } = string.Empty;
+    public DateTimeOffset Initiated { get; set; }
+    public DateTimeOffset Completed { get; set; }
+    public int    PartCount { get; set; }
+    public string ETag      { get; set; } = string.Empty;
 }

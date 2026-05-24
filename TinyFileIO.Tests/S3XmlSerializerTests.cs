@@ -1,5 +1,6 @@
 using System.Text;
 using System.Xml.Serialization;
+using TinyFileIO.Models.Api.Multipart;
 using TinyFileIO.Services;
 
 namespace TinyFileIO.Tests;
@@ -52,5 +53,32 @@ public sealed class S3XmlSerializerTests
     {
         var result = _sut.Deserialize<TestObject>(new MemoryStream());
         Assert.Null(result);
+    }
+
+    [Fact]
+    public void Deserialize_CompleteMultipartUpload_IgnoresS3DefaultNamespace()
+    {
+        const string xml = """
+            <CompleteMultipartUpload xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                <Part>
+                    <PartNumber>1</PartNumber>
+                    <ETag>&quot;etag-1&quot;</ETag>
+                </Part>
+                <Part>
+                    <PartNumber>2</PartNumber>
+                    <ETag>&quot;etag-2&quot;</ETag>
+                </Part>
+            </CompleteMultipartUpload>
+            """;
+
+        var result = _sut.Deserialize<CompleteMultipartUploadRequest>(
+            new MemoryStream(Encoding.UTF8.GetBytes(xml)));
+
+        Assert.NotNull(result);
+        Assert.Equal(2, result!.Parts.Count);
+        Assert.Equal(1, result.Parts[0].PartNumber);
+        Assert.Equal("\"etag-1\"", result.Parts[0].ETag);
+        Assert.Equal(2, result.Parts[1].PartNumber);
+        Assert.Equal("\"etag-2\"", result.Parts[1].ETag);
     }
 }

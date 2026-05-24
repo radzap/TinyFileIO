@@ -234,10 +234,10 @@ public sealed class ObjectController : S3ControllerBase
         if (meta.ContentRange is not null)
         {
             Response.Headers.ContentRange = meta.ContentRange;
-            return new FileStreamResult(body, meta.ContentType) { EnableRangeProcessing = false };
+            return new FileStreamResult(body, AdjustContentType(meta.ContentType)) { EnableRangeProcessing = false };
         }
 
-        return new FileStreamResult(body, meta.ContentType) { EnableRangeProcessing = true };
+        return new FileStreamResult(body, AdjustContentType(meta.ContentType)) { EnableRangeProcessing = true };
     }
 
     private async Task<IActionResult> ListParts(string bucket, string key, string uploadId, CancellationToken ct)
@@ -339,10 +339,10 @@ public sealed class ObjectController : S3ControllerBase
         [FromQuery(Name = "uploads")] string? uploads = null,
         [FromQuery(Name = "delete")] string? deleteParam = null)
     {
-        if (uploads is not null)
+        if (Request.Query.ContainsKey("uploads"))
             return await ListMultipartUploads(bucket, ct);
 
-        if (deleteParam is null)
+        if (!Request.Query.ContainsKey("delete"))
         {
             _logger.LogWarning(
                 "Unsupported POST {Method} {Path}{QueryString} Host={Host} ContentType={ContentType}",
@@ -350,7 +350,11 @@ public sealed class ObjectController : S3ControllerBase
             return S3Error("InvalidRequest", "Unsupported POST operation.", StatusCodes.Status400BadRequest);
         }
 
-        var body = Xml.Deserialize<DeleteObjectsRequest>(Request.Body);
+        var requestBody = S3ChunkedDecodingStream.IsAwsChunked(Request.Headers)
+            ? new S3ChunkedDecodingStream(Request.Body)
+            : Request.Body;
+
+        var body = await Xml.DeserializeAsync<DeleteObjectsRequest>(requestBody, ct);
         if (body is null)
             return MalformedXml();
 
@@ -366,7 +370,7 @@ public sealed class ObjectController : S3ControllerBase
     public async Task<IActionResult> ListMultipartUploads(string bucket, CancellationToken ct,
         [FromQuery(Name = "uploads")] string? uploads = null)
     {
-        if (uploads is null)
+        if (!Request.Query.ContainsKey("uploads"))
             return S3Error("InvalidRequest", "Missing uploads parameter.", StatusCodes.Status400BadRequest);
 
         var q = Request.Query;
@@ -391,11 +395,11 @@ public sealed class ObjectController : S3ControllerBase
         [FromQuery(Name = "uploads")] string? uploads = null,
         [FromQuery(Name = "uploadId")] string? uploadId = null)
     {
-        if (uploads is not null)
-            return await CreateMultipartUpload(bucket, key, ct);
-
         if (uploadId is not null)
             return await CompleteMultipartUpload(bucket, key, uploadId, ct);
+
+        if (Request.Query.ContainsKey("uploads"))
+            return await CreateMultipartUpload(bucket, key, ct);
 
         _logger.LogWarning(
             "Unsupported POST {Method} {Path}{QueryString} Host={Host} ContentType={ContentType}",
@@ -424,9 +428,18 @@ public sealed class ObjectController : S3ControllerBase
     private async Task<IActionResult> CompleteMultipartUpload(string bucket, string key,
         string uploadId, CancellationToken ct)
     {
-        var body = Xml.Deserialize<CompleteMultipartUploadRequest>(Request.Body);
+        var requestBody = S3ChunkedDecodingStream.IsAwsChunked(Request.Headers)
+            ? new S3ChunkedDecodingStream(Request.Body)
+            : Request.Body;
+
+        var body = await Xml.DeserializeAsync<CompleteMultipartUploadRequest>(requestBody, ct);
         if (body is null)
-            return MalformedXml();
+        {
+            _logger.LogWarning(
+                "CompleteMultipartUpload XML could not be parsed for {Bucket}/{Key} uploadId={UploadId}; completing from staged parts.",
+                bucket, key, uploadId);
+            body = new CompleteMultipartUploadRequest();
+        }
 
         body.Bucket = bucket;
         body.Key = key;
@@ -441,7 +454,7 @@ public sealed class ObjectController : S3ControllerBase
         {
             return NoSuchUpload(uploadId);
         }
-        catch (InvalidOperationException ex) when (ex.Message == "InvalidPart")
+        catch (InvalidOperationException ex) when (ex.Message.StartsWith("InvalidPart", StringComparison.Ordinal))
         {
             return S3Error("InvalidPart", "One or more of the specified parts could not be found.",
                 StatusCodes.Status400BadRequest);
@@ -523,5 +536,16 @@ public sealed class ObjectController : S3ControllerBase
             }
         }
         return meta;
+    }
+
+    private string AdjustContentType(string contentType)
+    {
+        // This is for bucket browsing in UI for rendering markdown files as HTML.
+        if (contentType == "text/markdown" && Request.Query.ContainsKey("X-Tfio-Presign"))
+        {
+            return "text/html";
+        }
+
+        return contentType;
     }
 }

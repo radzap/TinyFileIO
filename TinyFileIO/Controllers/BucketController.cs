@@ -45,7 +45,11 @@ public sealed class BucketController : S3ControllerBase
         CreateBucketRequest? body = null;
         if (Request.ContentLength > 0)
         {
-            body = Xml.Deserialize<CreateBucketRequest>(Request.Body);
+            var requestBody = S3ChunkedDecodingStream.IsAwsChunked(Request.Headers)
+                ? new S3ChunkedDecodingStream(Request.Body)
+                : Request.Body;
+
+            body = await Xml.DeserializeAsync<CreateBucketRequest>(requestBody, ct);
             if (body is null)
                 return MalformedXml();
         }

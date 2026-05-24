@@ -142,6 +142,25 @@ public sealed class FileSystemMultipartServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task CompleteMultipartUploadAsync_EmptyPartList_ConcatenatesAllStagedPartsInOrder()
+    {
+        CreateBucket("b");
+        var ct = TestContext.Current.CancellationToken;
+        var uploadId = await StartUploadAsync("b", "obj.txt", ct);
+        await UploadPartAsync("b", uploadId, 2, "World"u8.ToArray(), ct);
+        await UploadPartAsync("b", uploadId, 1, "Hello "u8.ToArray(), ct);
+
+        await _sut.CompleteMultipartUploadAsync(new CompleteMultipartUploadRequest
+        {
+            Bucket = "b", Key = "obj.txt", UploadId = uploadId,
+            Parts = []
+        }, ct);
+
+        var content = await File.ReadAllTextAsync(Path.Combine(_tmp.Path, "b", "obj.txt"), ct);
+        Assert.Equal("Hello World", content);
+    }
+
+    [Fact]
     public async Task CompleteMultipartUploadAsync_ReturnsCompositeETag()
     {
         CreateBucket("b");
@@ -233,5 +252,51 @@ public sealed class FileSystemMultipartServiceTests : IDisposable
         Assert.Contains(resp.Parts, p => p.PartNumber == 2);
         Assert.All(resp.Parts, p => Assert.True(p.Size > 0));
         Assert.All(resp.Parts, p => Assert.Matches("^\"[0-9a-f]{32}\"$", p.ETag));
+    }
+
+    [Fact]
+    public async Task ListMultipartUploadsAsync_AfterConsolidation_DoesNotIncludeCompletedUpload()
+    {
+        CreateBucket("b");
+        var ct = TestContext.Current.CancellationToken;
+        var uploadId = await StartUploadAsync("b", "obj.txt", ct);
+        var e1 = await UploadPartAsync("b", uploadId, 1, "Hello "u8.ToArray(), ct);
+        var e2 = await UploadPartAsync("b", uploadId, 2, "World"u8.ToArray(), ct);
+
+        await _sut.CompleteMultipartUploadAsync(new CompleteMultipartUploadRequest
+        {
+            Bucket = "b", Key = "obj.txt", UploadId = uploadId,
+            Parts = [new() { PartNumber = 1, ETag = e1 }, new() { PartNumber = 2, ETag = e2 }]
+        }, ct);
+
+        var resp = await _sut.ListMultipartUploadsAsync(
+            new ListMultipartUploadsRequest { Bucket = "b" }, ct);
+
+        Assert.DoesNotContain(resp.Uploads, u => u.UploadId == uploadId);
+    }
+
+    [Fact]
+    public async Task ListPartsAsync_AfterConsolidation_ReturnsSingleSyntheticWholePart()
+    {
+        CreateBucket("b");
+        var ct = TestContext.Current.CancellationToken;
+        var uploadId = await StartUploadAsync("b", "obj.txt", ct);
+        var e1 = await UploadPartAsync("b", uploadId, 1, "Hello "u8.ToArray(), ct);
+        var e2 = await UploadPartAsync("b", uploadId, 2, "World"u8.ToArray(), ct);
+
+        var completeResp = await _sut.CompleteMultipartUploadAsync(new CompleteMultipartUploadRequest
+        {
+            Bucket = "b", Key = "obj.txt", UploadId = uploadId,
+            Parts = [new() { PartNumber = 1, ETag = e1 }, new() { PartNumber = 2, ETag = e2 }]
+        }, ct);
+
+        var resp = await _sut.ListPartsAsync(
+            new ListPartsRequest { Bucket = "b", UploadId = uploadId, Key = "obj.txt" }, ct);
+
+        var part = Assert.Single(resp.Parts);
+        Assert.Equal(1, part.PartNumber);
+        Assert.Equal("Hello World".Length, part.Size);
+        Assert.Equal(completeResp.ETag, part.ETag);
+        Assert.False(resp.IsTruncated);
     }
 }
